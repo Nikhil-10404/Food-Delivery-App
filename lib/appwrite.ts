@@ -1,6 +1,8 @@
 import SignIn from "@/app/(auth)/sign-in";
 import { CreateUserPrams, SignInParams } from "@/type";
 import { Account, Avatars, Client, Databases, ID, Query } from "react-native-appwrite";
+import { Models } from "react-native-appwrite";
+
 
 export const appwriteConfig = {
   endpoint: process.env.EXPO_PUBLIC_APPWRITE_ENDPOINT as string, // must be string
@@ -47,7 +49,7 @@ client
   }
    export const signIn=async({email,password}:SignInParams)=>{
           try{
-         const session=await account.createEmailPasswordSession(email,password);
+         return await account.createEmailPasswordSession(email,password);
           }catch(e){
             throw new Error(e as string)
           }
@@ -63,7 +65,7 @@ client
                 appwriteConfig.userCollectionId,
                 [Query.equal('accountId',currentAccount.$id)]
             )
-            if(!currentUser)throw Error;
+            if (!currentUser) throw Error;
             return currentUser.documents[0];
 
         }catch(e){

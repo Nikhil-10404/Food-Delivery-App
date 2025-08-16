@@ -61,11 +61,7 @@ export default function Index() {
       );
     }}
     contentContainerClassName="pb-28 px-5"
-    ListFooterComponent={()=>(
-      <Button title='Try!' 
-      onPress={ () => { Sentry.captureException(new Error('First error')) }}/>
-
-    )}
+   
   />
 </SafeAreaView>
 
