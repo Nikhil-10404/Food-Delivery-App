@@ -1,9 +1,13 @@
 import { View, Text } from 'react-native'
 import React from 'react'
-import { Slot,Redirect } from 'expo-router'
+import { Slot, Redirect } from "expo-router";
 
-export default function _layout() {
-    const isAuthenticated=false;
-    if(!isAuthenticated)return <Redirect href="/sign-in"/>
-  return <Slot/>
+export default function Layout() {
+  const isAuthenticated = true; // replace with real auth state
+
+  if (!isAuthenticated) {
+    return <Redirect href="/sign-in" />;
+  }
+
+  return <Slot />;
 }
