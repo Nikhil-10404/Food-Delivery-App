@@ -2,15 +2,40 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import "../globals.css"
 import { FlatList, Pressable, Text, View,Image, TouchableOpacity,Button } from "react-native";
 import {images, offers} from "@/constants"
-import { Fragment } from "react";
+import { Fragment, useEffect } from "react";
 import cn from 'clsx';
 import CartButton from "@/components/CardButton";
 import * as Sentry from '@sentry/react-native'
 import useAuthStore from "@/store/auth.store";
- 
+import { client } from "@/lib/appwrite";
+import { Client } from "react-native-appwrite";
+import 'react-native-url-polyfill/auto';
+
+import { account } from "@/lib/appwrite";
+
+async function testConnection() {
+  try {
+    const res = await account.createAnonymousSession();
+    console.log("Connected to Appwrite ✅", res);
+  } catch (err) {
+    console.log("Appwrite connection failed ❌", err);
+  }
+}
+
+// const Client1 = new Client()
+//   .setEndpoint("https://fra.cloud.appwrite.io/v1")
+//   .setProject("your-project-id");
+
+// console.log(client.config);
+
+
+
 export default function Index() {
   const {user}=useAuthStore();
   console.log("User",JSON.stringify(user,null,2));
+   useEffect(() => {
+    testConnection(); // ✅ call it here
+  }, []);
   return (
     <SafeAreaView className="flex-1 bg-white">
       <View className="flex-between flex-row w-full my-5 px-5">
