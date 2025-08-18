@@ -24,6 +24,8 @@ const SignIn = () => {
          
        await fetchAuthenticatedUser();
       Alert.alert('Succes','User Signed-In Successfully');
+      console.log("Calling signIn with", email);
+
       router.replace("/");
     }catch(error:any){
       Alert.alert('Error',error.message);

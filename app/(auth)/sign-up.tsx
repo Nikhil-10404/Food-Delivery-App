@@ -24,6 +24,9 @@ const SignUp = () => {
        
 
       Alert.alert("Success","User signed up succesfully");
+      console.log("Calling createUser with", email);
+
+
       router.replace('/');
     }catch(error:any){
       Alert.alert('Error',error.message);
