@@ -47,7 +47,9 @@
       "router": {},
       "eas": {
         "projectId": "d935a3cc-463b-409e-8b40-e9ae247e5718"
-      }
+      },
+       "BACKEND_URL": "https://otp-backend1.onrender.com",
+       "experiments": { "typedRoutes": true }
     }
   }
 }
