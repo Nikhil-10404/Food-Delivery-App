@@ -9,7 +9,6 @@ import MenuCard from '@/components/MenuCard';
 import { MenuItem } from '@/type';
 import SearchBar from '@/components/SearchBar';
 import Filter from '@/components/Filter';
-// import seed from '@/lib/seed'
 
 const Search=()=>{
 
@@ -76,23 +75,5 @@ const Search=()=>{
   )
 }
 
-// const Search = () => {
-//    const runSeeding = async () => {
-//     try {
-//       const res = await fetch("http://10.129.55.198:4000/seed", { method: "POST" });
-//       const data = await res.json();
-//       if (data.success) Alert.alert("✅ Success", data.message);
-//       else Alert.alert("❌ Failed", data.error);
-//     } catch (err: any) {
-//       Alert.alert("❌ Network Error", err.message);
-//     }
-//   };
-
-//   return (
-//     <View style={{ marginTop: 50 }}>
-//       <Button title="Seed Database" onPress={runSeeding} />
-//     </View>
-//   );
-// }
 
 export default Search

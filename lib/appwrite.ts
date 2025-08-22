@@ -20,6 +20,7 @@ export const appwriteConfig = {
   bucketId:"68a20c42001aef95854e",
   apikey:"standard_7de18e47d6d481575ef51b7d22e9434c942b3121769a2f608d03c3a366211f00956c477a69171b4f7856e71e4b617f59d619485bfc8efa76b6be4e526a756750309429de92926a0a9d08e9e1e00633c63e2026e967c51cd1164a71c8f75d48742c7a4ba784203f0f60bfced5f74677045daa0d878609ebdbbaea7d0d8ff6933c",
   projectId: process.env.EXPO_PUBLIC_APPWRITE_PROJECT_ID as string,
+  Restaurant_Collection_ID:"68a8499900095c6a7583"
 };
 
 export const client = new Client();
@@ -34,30 +35,36 @@ client
   const avatars=new Avatars(client);
   export const storage = new Storage(client)
 
-  export const createUser =async({email,password,name}:CreateUserPrams)=>{
-    try{
-         const newAccount=await account.create(ID.unique(),email,password,name)
-         if(!newAccount)throw Error;
+  export const createUser = async ({ email, password, name, phone }: CreateUserPrams) => {
+  try {
+    const newAccount = await account.create(ID.unique(), email, password, name);
+    if (!newAccount) throw Error;
 
-         await signIn({email,password});
+    // sign them in so we can immediately write their user doc
+    await signIn({ email, password });
 
-         const avatarUrl=avatars.getInitialsURL(name);
+    const avatarUrl = avatars.getInitialsURL(name);
 
-         return await databases.createDocument(
-            appwriteConfig.databaseId,
-            appwriteConfig.userCollectionId,
-            ID.unique(),
-            {   accountId:newAccount.$id,
-                email,name,
-                avatar:avatarUrl
-            }
-            
-         )
-    }catch(e){
-        throw new Error(e as string)
+    // normalize phone -> keep only digits (store as string)
+    const normalizedPhone = (phone || "").replace(/\D/g, "");
 
-    }
+    return await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.userCollectionId,
+      ID.unique(),
+      {
+        accountId: newAccount.$id,
+        email,
+        name,
+        avatar: avatarUrl,
+        phone: normalizedPhone || null,   // ✅ store phone (string) or null
+      }
+    );
+  } catch (e) {
+    throw new Error(e as string);
   }
+};
+
    export const signIn=async({email,password}:SignInParams)=>{
           try{
          return await account.createEmailPasswordSession(email,password);

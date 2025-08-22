@@ -90,11 +90,14 @@ interface ProfileFieldProps {
     icon: ImageSourcePropType;
 }
 
-interface CreateUserPrams {
-    email: string;
-    password: string;
-    name: string;
+// types you already have…
+export interface CreateUserPrams {
+  name: string;
+  email: string;
+  password: string;
+  phone?: string;     // ✅ add this
 }
+
 
 interface SignInParams {
     email: string;
