@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { View, Text, TextInput, TouchableOpacity, ActivityIndicator, Alert } from "react-native";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { getCurrentUser } from "@/lib/appwrite";
 import { startOtp } from "@/lib/api";
 
 export default function ResetPasswordOtp() {
+  const params = useLocalSearchParams<{ userId?: string }>();
+
   const [accountId, setAccountId] = useState<string>("");
   const [sending, setSending] = useState(false);
   const [cooldownMs, setCooldownMs] = useState(0);
@@ -12,10 +14,14 @@ export default function ResetPasswordOtp() {
   const [expiresMs, setExpiresMs] = useState(0);
   const [otp, setOtp] = useState("");
 
+  // Resolve accountId: prefer query param, else try current user
   useEffect(() => {
     (async () => {
       try {
-        // getCurrentUser returns your Users doc; backend needs the *Appwrite accountId*
+        if (params?.userId) {
+          setAccountId(String(params.userId));
+          return;
+        }
         const userDoc: any = await getCurrentUser();
         if (!userDoc?.accountId) throw new Error("No accountId found");
         setAccountId(userDoc.accountId);
@@ -24,8 +30,9 @@ export default function ResetPasswordOtp() {
         router.back();
       }
     })();
-  }, []);
+  }, [params?.userId]);
 
+  // countdowns
   useEffect(() => {
     if (expiresMs <= 0) return;
     const t = setInterval(() => setExpiresMs(ms => Math.max(0, ms - 1000)), 1000);
@@ -38,31 +45,30 @@ export default function ResetPasswordOtp() {
     return () => clearInterval(t);
   }, [cooldownMs]);
 
-// app/reset-password/otp.tsx (inside sendCode)
-async function sendCode() {
-  if (!accountId) return Alert.alert("Error", "Missing user id.");
-  setSending(true);
-  try {
-    const r = await startOtp(accountId);
-    setCooldownMs(r.resendCooldownMs);
-    setTtlMs(r.ttlMs);
-    setExpiresMs(r.ttlMs);
-    Alert.alert("Code sent", "Check your email for the 6-digit code.");
-  } catch (e: any) {
-    console.log("[OTP start] error:", e); // <-- see full error in console
-    const msg = typeof e?.message === "string" ? e.message : "Failed to send code.";
-    Alert.alert("Failed", msg);
-  } finally {
-    setSending(false);
+  async function sendCode() {
+    if (!accountId) return Alert.alert("Error", "Missing user id.");
+    setSending(true);
+    try {
+      const r = await startOtp(accountId);
+      setCooldownMs(r.resendCooldownMs);
+      setTtlMs(r.ttlMs);
+      setExpiresMs(r.ttlMs);
+      Alert.alert("Code sent", "Check your email for the 6-digit code.");
+    } catch (e: any) {
+      console.log("[OTP start] error:", e);
+      const msg = typeof e?.message === "string" ? e.message : "Failed to send code.";
+      Alert.alert("Failed", msg);
+    } finally {
+      setSending(false);
+    }
   }
-}
 
   function continueNext() {
-  if (otp.length !== 6) return Alert.alert("Invalid", "Enter the 6-digit code.");
-  router.push(
-    `/reset-password/new?userId=${encodeURIComponent(accountId)}&otp=${encodeURIComponent(otp)}` as any
-  );
-}
+    if (otp.length !== 6) return Alert.alert("Invalid", "Enter the 6-digit code.");
+    router.push(
+      `/reset-password/new?userId=${encodeURIComponent(accountId)}&otp=${encodeURIComponent(otp)}` as any
+    );
+  }
 
   return (
     <View style={{ flex: 1, padding: 20, gap: 12, justifyContent: "center" }}>

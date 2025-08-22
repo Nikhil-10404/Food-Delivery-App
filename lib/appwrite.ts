@@ -85,6 +85,28 @@ client
         }
     }
 
+    // Find the Appwrite Account ID from your Users collection by email
+export const findAccountIdByEmail = async (email: string) => {
+  const trimmed = (email || "").trim().toLowerCase();
+  if (!trimmed) throw new Error("email_required");
+
+  const res = await databases.listDocuments(
+    appwriteConfig.databaseId,
+    appwriteConfig.userCollectionId,
+    [Query.equal("email", trimmed)]
+  );
+
+  if (!res || !res.documents?.length) {
+    throw new Error("not_found");
+  }
+
+  const doc = res.documents[0] as any;
+  if (!doc.accountId) throw new Error("no_accountId_on_user_doc");
+
+  return String(doc.accountId);
+};
+
+
     export const getMenu=async({category,query}:GetMenuParams)=>{
       try{
             const queries:string[]=[];
