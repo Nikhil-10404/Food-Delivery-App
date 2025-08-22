@@ -1,27 +1,29 @@
-// LogoutButton.tsx
+// components/LogoutButton.tsx
 import React, { useState } from "react";
-import { TouchableOpacity, Text, ActivityIndicator } from "react-native";
+import { Pressable, Text, ActivityIndicator, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { Account } from "appwrite";
-import { useRouter,Redirect } from "expo-router";
+import { useRouter } from "expo-router";
 import useAuthStore from "@/store/auth.store";
 
 interface LogoutButtonProps {
-  account: Account; // pass your Appwrite Account instance
+  account: Account;           // Appwrite Account instance
+  style?: object;             // optional extra container styles
+  label?: string;             // optional custom label
 }
 
-const LogoutButton = ({ account }:LogoutButtonProps) => {
+const LogoutButton = ({ account, style, label = "Logout" }: LogoutButtonProps) => {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
 
   const handleLogout = async () => {
+    if (loading) return;
     setLoading(true);
     try {
-      // Logs out from the current session
       await account.deleteSession("current");
       const { setIsAuthenticated, setUser } = useAuthStore.getState();
-    setIsAuthenticated(false);
-    setUser(null);
-      // Redirect to sign-in page
+      setIsAuthenticated(false);
+      setUser(null);
       router.replace("/sign-in");
     } catch (err) {
       console.error("Logout failed:", err);
@@ -30,26 +32,50 @@ const LogoutButton = ({ account }:LogoutButtonProps) => {
   };
 
   return (
-    <TouchableOpacity
+    <Pressable
       onPress={handleLogout}
-      style={{
-        backgroundColor: "#FF4D4D", // red for logout
-        paddingVertical: 12,
-        paddingHorizontal: 20,
-        borderRadius: 10,
-        alignItems: "center",
-        marginVertical: 10,
-      }}
       disabled={loading}
+      hitSlop={12}
+     style={({ pressed }) => [
+  {
+    paddingHorizontal: 24,      // give some horizontal padding
+    height: 52,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: "#ef4444",
+    backgroundColor: pressed ? "#fee2e2" : "#ffffff",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+    opacity: loading ? 0.7 : 1,
+  },
+  style,
+]}
+      accessibilityRole="button"
+      accessibilityLabel={label}
     >
       {loading ? (
-        <ActivityIndicator color="#fff" />
+        <ActivityIndicator color="#ef4444" />
       ) : (
-        <Text style={{ color: "#fff", fontWeight: "bold", fontSize: 16 }}>
-          Logout
-        </Text>
+        <View style={{ flexDirection: "row", alignItems: "center" }}>
+          <Ionicons name="log-out-outline" size={18} color="#ef4444" />
+          <Text
+            style={{
+              color: "#ef4444",
+              fontWeight: "700",
+              fontSize: 16,
+              marginLeft: 8,
+            }}
+          >
+            {label}
+          </Text>
+        </View>
       )}
-    </TouchableOpacity>
+    </Pressable>
   );
 };
 
