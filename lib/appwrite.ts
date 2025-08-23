@@ -20,7 +20,8 @@ export const appwriteConfig = {
   bucketId:"68a20c42001aef95854e",
   apikey:"standard_7de18e47d6d481575ef51b7d22e9434c942b3121769a2f608d03c3a366211f00956c477a69171b4f7856e71e4b617f59d619485bfc8efa76b6be4e526a756750309429de92926a0a9d08e9e1e00633c63e2026e967c51cd1164a71c8f75d48742c7a4ba784203f0f60bfced5f74677045daa0d878609ebdbbaea7d0d8ff6933c",
   projectId: process.env.EXPO_PUBLIC_APPWRITE_PROJECT_ID as string,
-  Restaurant_Collection_ID:"68a8499900095c6a7583"
+  Restaurant_Collection_ID:"68a8499900095c6a7583",
+  menuItemsCollectionId:"68a9e32e00019e153f95"
 };
 
 export const client = new Client();

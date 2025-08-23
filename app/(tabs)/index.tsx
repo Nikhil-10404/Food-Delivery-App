@@ -1,38 +1,38 @@
 import { SafeAreaView } from "react-native-safe-area-context";
 import "../globals.css";
-import React, { useEffect, useMemo, useState, useCallback } from "react";
-import {
-  ActivityIndicator,
-  FlatList,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from "react-native";
-import { Image } from "expo-image";
+import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { ActivityIndicator, Animated } from "react-native";
 import { useRouter } from "expo-router";
-import CartButton from "@/components/CardButton";
 import useAuthStore from "@/store/auth.store";
-import { databases, appwriteConfig, storage } from "@/lib/appwrite";
+import { databases, appwriteConfig } from "@/lib/appwrite";
 import { Query } from "react-native-appwrite";
 
-// ====== IDs from your config ======
+import HomeHeaderLight from "@/components/home/HomeHeaderLight";
+import RestaurantCardLight from "@/components/home/RestaurantCardLight";
+import TabsBarLight from "@/components/home/TabsBarLight";
+
 const DB_ID = appwriteConfig.databaseId;
 const COLLECTION_RESTAURANTS = appwriteConfig.Restaurant_Collection_ID;
-// ==================================
+
+// browsing page size
+const PAGE_SIZE = 24;
+// fetch batch size when pulling "all" for search
+const SEARCH_BATCH = 100;
+// hard cap (safety) for max items we’ll fetch during a search
+const SEARCH_MAX = 600;
 
 const MOOD_LINES = [
+  "Find your favorite food 🍔",
+  "Hungry? Let’s fix that 🤤",
+  "Something quick or a full feast?",
+  "Snack now, study later.",
   "What’s your mood today?",
-  "Craving something tasty?",
-  "Quick bite or full feast?",
-  "Something new or your usual?",
-  "Feeling snacky or hungry-hungry?",
 ];
 
 type Restaurant = {
   $id: string;
   name: string;
-  imageUrl?: string; // fileId (preferred) or https URL
+  imageUrl?: string;
   rating?: number;
   address?: string;
   categories?: string[];
@@ -47,81 +47,25 @@ function timeOfDayGreeting(d = new Date()) {
   return "Good evening";
 }
 
-/**
- * Build image URI:
- * - If stored value is a full URL → return it
- * - Else assume it's an Appwrite fileId → return getFileView URL
- */
-function buildImageUri(val?: string) {
-  const placeholder = "https://picsum.photos/320/240";
-  if (!val || !val.trim()) return placeholder;
+const shapeDocs = (docs: any[]): Restaurant[] =>
+  docs
+    .map((d) => ({
+      $id: String(d.$id),
+      name: typeof d.name === "string" ? d.name : String(d.name ?? ""),
+      imageUrl: typeof d.imageUrl === "string" ? d.imageUrl : undefined,
+      rating: typeof d.rating === "number" ? d.rating : undefined,
+      address: typeof d.address === "string" ? d.address : undefined,
+      categories: Array.isArray(d.categories) ? d.categories.map((x: any) => String(x)) : undefined,
+      deliveryTimeMins: typeof d.deliveryTimeMins === "number" ? d.deliveryTimeMins : undefined,
+      description: typeof d.description === "string" ? d.description : undefined,
+    }))
+    .filter((r) => r.name.length > 0);
 
-  const v = val.trim();
-  if (/^https?:\/\//i.test(v)) {
-    return v;
-  }
-
-  try {
-    // Use getFileView instead of getFilePreview (preview is blocked on free plan)
-    return storage.getFileView(appwriteConfig.bucketId, v).toString();
-  } catch (e) {
-    console.error("❌ Failed to build Appwrite view URL for", v, e);
-    return placeholder;
-  }
-}
-
-/**
- * Image component with single fallback:
- * - Try /view (default)
- * - If fails, try /download
- */
-function ImageWithFallback({
-  src,
-  altName,
-}: {
-  src: string;
-  altName: string;
-}) {
-  const [uri, setUri] = useState(src);
-  const [triedDownload, setTriedDownload] = useState(false);
-
-  const buildDownloadUrl = (input: string) => {
-    try {
-      const u = new URL(input);
-      const parts = u.pathname.split("/").filter(Boolean);
-      const bIdx = parts.indexOf("buckets");
-      const fIdx = parts.indexOf("files");
-      const bucketId = parts[bIdx + 1];
-      const fileId = parts[fIdx + 1];
-      return `${u.origin}/v1/storage/buckets/${bucketId}/files/${fileId}/download?project=${u.searchParams.get(
-        "project"
-      ) || ""}`;
-    } catch {
-      return input;
-    }
-  };
-
-  useEffect(() => {
-    setUri(src);
-    setTriedDownload(false);
-  }, [src]);
-
-  return (
-    <Image
-      source={{ uri }}
-      style={{ width: 96, height: 80, borderRadius: 12, backgroundColor: "#eee" }}
-      contentFit="cover"
-      transition={150}
-      cachePolicy="memory-disk"
-      onError={() => {
-        if (!triedDownload) {
-          setTriedDownload(true);
-          setUri(buildDownloadUrl(src));
-        }
-      }}
-    />
-  );
-}
+const buildQueries = (limit: number, cursor?: string | null) => {
+  const q: any[] = [Query.orderAsc("name"), Query.limit(limit)];
+  if (cursor) q.push(Query.cursorAfter(cursor));
+  return q;
+};
 
 export default function HomeIndex() {
   const router = useRouter();
@@ -130,145 +74,220 @@ export default function HomeIndex() {
   const [search, setSearch] = useState("");
   const [mood, setMood] = useState(MOOD_LINES[0]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
 
-  useEffect(() => {
-    setMood(MOOD_LINES[Math.floor(Math.random() * MOOD_LINES.length)]);
-  }, []);
+  // prevent duplicate loads on fast scroll
+  const loadingMoreRef = useRef(false);
+  // track first load so we don’t auto-refetch on mount when search is empty
+  const initialLoadedRef = useRef(false);
 
   const username =
     (user?.name && user.name.trim()) ||
     (user?.email && user.email.split("@")[0]) ||
     "Foodie";
-
   const greeting = `${timeOfDayGreeting()}, ${username}`;
 
-  const loadRestaurants = useCallback(
-    async (q?: string) => {
+  useEffect(() => {
+    setMood(MOOD_LINES[Math.floor(Math.random() * MOOD_LINES.length)]);
+  }, []);
+
+  /** Normal browse: first page */
+ const loadInitial = useCallback(async () => {
+  setLoading(true);
+  setIsSearching(false);
+  try {
+    const res = await databases.listDocuments(
+      DB_ID,
+      COLLECTION_RESTAURANTS,
+      [Query.orderAsc("name"), Query.limit(PAGE_SIZE)]
+    );
+    const items = shapeDocs(res.documents ?? []);
+    setRestaurants(items);
+    setNextCursor(items.length === PAGE_SIZE ? items[items.length - 1].$id : null);
+  } catch (err: any) {
+    console.error("loadInitial failed (ordered):", err?.message || err);
+    // fallback: try again without orderAsc (works even if index missing)
+    try {
+      const res2 = await databases.listDocuments(
+        DB_ID,
+        COLLECTION_RESTAURANTS,
+        [Query.limit(PAGE_SIZE)]
+      );
+      const items2 = shapeDocs(res2.documents ?? []);
+      setRestaurants(items2);
+      setNextCursor(items2.length === PAGE_SIZE ? items2[items2.length - 1].$id : null);
+    } catch (err2: any) {
+      console.error("loadInitial fallback failed:", err2?.message || err2);
+      setRestaurants([]);
+      setNextCursor(null);
+    }
+  } finally {
+    setLoading(false);
+    initialLoadedRef.current = true;
+  }
+}, []);
+
+const loadMore = useCallback(async () => {
+  if (isSearching) return;
+  if (!nextCursor || loadingMoreRef.current || isLoadingMore) return;
+
+  loadingMoreRef.current = true;
+  setIsLoadingMore(true);
+  try {
+    const res = await databases.listDocuments(
+      DB_ID,
+      COLLECTION_RESTAURANTS,
+      [Query.orderAsc("name"), Query.limit(PAGE_SIZE), Query.cursorAfter(nextCursor)]
+    );
+    const items = shapeDocs(res.documents ?? []);
+    setRestaurants((prev) => [...prev, ...items]);
+    setNextCursor(items.length === PAGE_SIZE ? items[items.length - 1].$id : null);
+  } catch (err: any) {
+    console.error("loadMore failed (ordered):", err?.message || err);
+    // fallback without ordering
+    try {
+      const res2 = await databases.listDocuments(
+        DB_ID,
+        COLLECTION_RESTAURANTS,
+        [Query.limit(PAGE_SIZE), Query.cursorAfter(nextCursor)]
+      );
+      const items2 = shapeDocs(res2.documents ?? []);
+      setRestaurants((prev) => [...prev, ...items2]);
+      setNextCursor(items2.length === PAGE_SIZE ? items2[items2.length - 1].$id : null);
+    } catch (err2: any) {
+      console.error("loadMore fallback failed:", err2?.message || err2);
+    }
+  } finally {
+    setIsLoadingMore(false);
+    loadingMoreRef.current = false;
+  }
+}, [nextCursor, isLoadingMore, isSearching]);
+
+
+  /** Fetch ALL (batched) then filter locally — reliable search */
+  const runSearch = useCallback(
+    async (termRaw: string) => {
+      const term = termRaw.trim();
+      if (!term) {
+        // If user submits empty, just restore full list
+        await loadInitial();
+        return;
+      }
       setLoading(true);
+      setIsSearching(true);
       try {
-        const queries: any[] = [Query.orderAsc("name")];
-        if (q && q.trim()) queries.push(Query.search("name", q.trim()));
+        let all: Restaurant[] = [];
+        let cursor: string | null = null;
 
-        const res = await databases.listDocuments(DB_ID, COLLECTION_RESTAURANTS, queries);
-        const docs = res.documents as unknown as Restaurant[];
+        while (all.length < SEARCH_MAX) {
+          const res = await databases.listDocuments(DB_ID, COLLECTION_RESTAURANTS, buildQueries(SEARCH_BATCH, cursor));
+          const batch = shapeDocs(res.documents ?? []);
+          all = all.concat(batch);
+          if (batch.length < SEARCH_BATCH) break;
+          cursor = batch[batch.length - 1].$id;
+        }
 
-        const normalized = q?.trim().toLowerCase();
-        const filtered =
-          normalized && normalized.length > 0
-            ? docs.filter((r) => {
-                const hay = `${r.name ?? ""} ${r.address ?? ""} ${(r.categories || []).join(
-                  " "
-                )} ${r.description ?? ""}`.toLowerCase();
-                return hay.includes(normalized);
-              })
-            : docs;
+        const needle = term.toLowerCase();
+        const filtered = all.filter((r) => {
+          const hay = `${r.name} ${r.address ?? ""} ${(r.categories ?? []).join(" ")} ${r.description ?? ""}`.toLowerCase();
+          return hay.includes(needle);
+        });
 
         setRestaurants(filtered);
-      } catch (e) {
-        console.warn("Failed to load restaurants", e);
+        setNextCursor(null); // disable infinite scroll while searching
+      } catch {
         setRestaurants([]);
+        setNextCursor(null);
       } finally {
         setLoading(false);
       }
     },
-    []
+    [loadInitial]
   );
 
+  // initial page
   useEffect(() => {
-    loadRestaurants();
-  }, [loadRestaurants]);
+    loadInitial();
+  }, [loadInitial]);
 
-  const onSubmitSearch = () => loadRestaurants(search);
+  // ✅ Auto-restore full list when the search field is cleared (no button press)
+  useEffect(() => {
+    const cleared = search.trim().length === 0;
+    if (!cleared) return;
+    if (!initialLoadedRef.current) return; // avoid second fetch on mount
+    setIsSearching(false);
+    setNextCursor(null);
+    loadInitial();
+  }, [search, loadInitial]);
+
+  const onSubmitSearch = () => {
+    // only trigger when user presses Search/Return
+    runSearch(search);
+  };
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    if (isSearching) {
+      await runSearch(search);
+    } else {
+      await loadInitial();
+    }
+    setRefreshing(false);
+  };
 
   const header = useMemo(
     () => (
-      <View className="px-5">
-        <Text className="text-3xl font-extrabold text-black">Foodie</Text>
-        <View className="mt-1 flex-row items-center justify-between">
-          <Text className="text-sm font-semibold text-neutral-600">NIT HAMIRPUR</Text>
-          <CartButton />
-        </View>
-        <View className="mt-4">
-          <Text className="text-2xl font-bold text-black">{greeting}</Text>
-          <Text className="text-base text-neutral-600 mt-1">{mood}</Text>
-        </View>
-        <View className="mt-4 flex-row items-center bg-white rounded-2xl border px-3 py-2">
-          <TextInput
-            placeholder="Search cafés or dishes…"
-            value={search}
-            onChangeText={setSearch}
-            onSubmitEditing={onSubmitSearch}
-            returnKeyType="search"
-            className="flex-1 text-base"
-          />
-          <TouchableOpacity onPress={onSubmitSearch}>
-            <Text className="text-indigo-600 font-semibold">Search</Text>
-          </TouchableOpacity>
-        </View>
-        <Text className="mt-5 mb-2 text-lg font-semibold text-black">
-          All Restaurants (A–Z)
-        </Text>
-      </View>
+      <HomeHeaderLight
+        greeting={greeting}
+        mood={mood}
+        search={search}
+        onChangeSearch={setSearch}
+        onSubmitSearch={onSubmitSearch}
+      />
     ),
     [greeting, mood, search]
   );
 
-  const renderRestaurant = ({ item }: { item: Restaurant }) => {
-    const uri = buildImageUri(item.imageUrl);
-    // console.log("🔍 Rendering:", item.name, "| uri:", uri);
-
-    return (
-      <TouchableOpacity
-        onPress={() => router.push(`/restaurants/${item.$id}`)}
-        className="mx-5 mb-3 bg-white rounded-2xl p-3 border"
-        activeOpacity={0.85}
-      >
-        <View className="flex-row gap-3">
-          <ImageWithFallback src={uri} altName={item.name} />
-          <View className="flex-1">
-            <Text className="text-base font-semibold text-black" numberOfLines={1}>
-              {item.name}
-            </Text>
-            {!!item.description && (
-              <Text className="text-xs text-neutral-600 mt-0.5" numberOfLines={2}>
-                {item.description}
-              </Text>
-            )}
-            {!!item.address && (
-              <Text className="text-[11px] text-neutral-500 mt-1" numberOfLines={1}>
-                {item.address}
-              </Text>
-            )}
-            <View className="flex-row items-center gap-2 mt-1">
-              {!!item.rating && <Text className="text-xs text-neutral-700">⭐ {item.rating}</Text>}
-              {!!item.deliveryTimeMins && (
-                <Text className="text-xs text-neutral-700">⏱ {item.deliveryTimeMins} mins</Text>
-              )}
-            </View>
-          </View>
-        </View>
-      </TouchableOpacity>
-    );
-  };
+  const footer = useMemo(
+    () => (isLoadingMore ? <ActivityIndicator style={{ paddingVertical: 16 }} /> : null),
+    [isLoadingMore]
+  );
 
   return (
-    <SafeAreaView className="flex-1 bg-white">
+    <SafeAreaView style={{ flex: 1, backgroundColor: "#FFF" }}>
       {loading && restaurants.length === 0 ? (
-        <View className="flex-1 items-center justify-center">
+        <Animated.View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
           <ActivityIndicator />
-          <Text className="text-xs text-neutral-500 mt-2">Loading restaurants…</Text>
-        </View>
+        </Animated.View>
       ) : (
-        <FlatList
-          data={restaurants}
-          keyExtractor={(i) => i.$id}
-          renderItem={renderRestaurant}
-          ListHeaderComponent={header}
-          contentContainerStyle={{ paddingBottom: 96 }}
-          onRefresh={() => loadRestaurants(search)}
-          refreshing={loading}
-        />
+        <>
+          <Animated.FlatList
+            data={restaurants}
+            keyExtractor={(i) => i.$id}
+            renderItem={({ item }) => (
+              <RestaurantCardLight
+                item={item}
+                onPress={() => (router as any).push({
+                    pathname: "/restaurants/[id]",   // runtime URL (group name isn’t part of the URL)
+                    params: { id: String(item.$id) },
+})}
+              />
+            )}
+            ListHeaderComponent={header}
+            ListFooterComponent={footer}
+            onEndReachedThreshold={0.4}
+            onEndReached={loadMore}
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            contentContainerStyle={{ paddingBottom: 88 }}
+            keyboardShouldPersistTaps="handled"
+          />
+          <TabsBarLight />
+        </>
       )}
     </SafeAreaView>
   );
