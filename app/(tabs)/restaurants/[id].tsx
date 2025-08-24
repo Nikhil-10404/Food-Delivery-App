@@ -4,7 +4,6 @@ import { Image as ExpoImage } from "expo-image";
 import {
   View,
   Text,
-  Image,
   FlatList,
   TextInput,
   TouchableOpacity,
@@ -14,7 +13,7 @@ import {
   StyleSheet,
   Platform,
 } from "react-native";
-import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { databases, appwriteConfig } from "@/lib/appwrite";
@@ -30,6 +29,7 @@ type MenuItemDoc = Models.Document & {
   photoId?: string;
   restaurant: string;
   description?: string;
+  category?: string; // <-- NEW
 };
 
 type RestaurantDoc = Models.Document & {
@@ -75,24 +75,29 @@ export default function RestaurantDetails() {
   const params = useLocalSearchParams<{ id?: string }>();
   const restaurantId = params.id as string;
 
-  // ✅ Call hooks at the top (before any conditional returns)
-  const insets = useSafeAreaInsets();
-  const TopOffset = Platform.select({ ios: 6, android: 4, default: 6 }); // slightly lowered, feels native
-
   const [restaurant, setRestaurant] = useState<RestaurantDoc | null>(null);
   const [items, setItems] = useState<MenuItemDoc[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
+
+  // category state
+  const [selectedCategory, setSelectedCategory] = useState<string>("All");
 
   const open = useMemo(() => (restaurant ? isOpenNow(restaurant) : false), [restaurant]);
 
+  // Build unique category list from items
+  const categories = useMemo(() => {
+    const set = new Set<string>();
+    items.forEach((it) => set.add((it.category || "Others").trim()));
+    return ["All", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
+  }, [items]);
+
+  // Filter by category
   const filteredItems = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter((it) => it.name.toLowerCase().includes(q));
-  }, [items, query]);
+    if (selectedCategory === "All") return items;
+    return items.filter((it) => (it.category || "Others") === selectedCategory);
+  }, [items, selectedCategory]);
 
   const fetchData = useCallback(async () => {
     if (!restaurantId) return;
@@ -107,7 +112,7 @@ export default function RestaurantDetails() {
       );
       setRestaurant(rDoc);
 
-      // Prefer embedded reverse relation if available
+      // Prefer embedded relation if available
       let embedded: MenuItemDoc[] | null = null;
       const rel = (rDoc as any)?.menuItems;
       if (Array.isArray(rel) && rel.length > 0) {
@@ -126,6 +131,7 @@ export default function RestaurantDetails() {
             photoId: m.photoId,
             restaurant: m.restaurant,
             description: m.description,
+            category: m.category, // <-- NEW
           })) as MenuItemDoc[];
         }
       }
@@ -138,8 +144,11 @@ export default function RestaurantDetails() {
           MENU_ITEMS_COLLECTION_ID,
           [Query.equal("restaurant", restaurantId), Query.orderAsc("name")]
         );
-        setItems(list.documents || []);
+        setItems((list.documents || []).map(d => ({ ...d, price: Number(d.price) })));
       }
+
+      // default category = All
+      setSelectedCategory("All");
     } catch (e: any) {
       console.error("Failed to load restaurant details:", e);
       setError(e?.message || "Failed to load data");
@@ -165,25 +174,26 @@ export default function RestaurantDetails() {
   const renderItem = ({ item }: { item: MenuItemDoc }) => (
     <TouchableOpacity onPress={() => (router as any).push(`/item/${item.$id}`)}>
       <View style={styles.itemCard}>
-       {item.photoId ? (
-  <ExpoImage
-    source={{ uri: item.photoId }}
-    style={styles.itemImage}
-    contentFit="cover"
-    transition={120}
-    onError={(e) =>
-      console.log("Image failed:", item.name, item.photoId, e)
-    }
-  />
-) : (
-  <View style={[styles.itemImage, styles.itemImagePlaceholder]} />
-)}
+        {item.photoId ? (
+          <ExpoImage
+            source={{ uri: item.photoId }}
+            style={styles.itemImage}
+            contentFit="cover"
+            transition={120}
+            onError={(e) => console.log("Image failed:", item.name, item.photoId, e)}
+          />
+        ) : (
+          <View style={[styles.itemImage, styles.itemImagePlaceholder]} />
+        )}
 
         <View style={styles.itemInfo}>
-          <Text style={styles.itemName} numberOfLines={2}>
-            {item.name}
-          </Text>
+          <Text style={styles.itemName} numberOfLines={2}>{item.name}</Text>
           <Text style={styles.itemPrice}>₹ {Number(item.price).toFixed(0)}</Text>
+          {!!item.category && (
+            <View style={styles.catPill}>
+              <Text style={styles.catPillText}>{item.category}</Text>
+            </View>
+          )}
         </View>
       </View>
     </TouchableOpacity>
@@ -209,40 +219,34 @@ export default function RestaurantDetails() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }}>
       {/* Top Bar */}
-      <View style={[styles.topBar, { paddingTop: TopOffset }]}>
-  <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}>
-    <Ionicons name="chevron-back" size={24} />
-  </TouchableOpacity>
-  <View style={{ flex: 1 }} />
-  <TouchableOpacity onPress={() => (router as any).push("/card")} style={styles.iconBtn}>
-    <Ionicons name="cart-outline" size={24} />
-  </TouchableOpacity>
-</View>
-
+      <View style={styles.topBar}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}>
+          <Ionicons name="chevron-back" size={24} />
+        </TouchableOpacity>
+        <View style={{ flex: 1 }} />
+        <TouchableOpacity onPress={() => (router as any).push("/card")} style={styles.iconBtn}>
+          <Ionicons name="cart-outline" size={24} />
+        </TouchableOpacity>
+      </View>
 
       {/* Header */}
       <View style={styles.header}>
-      {restaurant.imageUrl ? (
-  <ExpoImage
-    source={{ uri: restaurant.imageUrl }}
-    style={styles.cover}
-    contentFit="cover"
-    transition={150}
-    onError={(e) =>
-      console.log("Image failed:", restaurant.imageUrl, e)
-    }
-  />
-) : (
-  <View style={[styles.cover, styles.coverPlaceholder]} />
-)}
+        {restaurant.imageUrl ? (
+          <ExpoImage
+            source={{ uri: restaurant.imageUrl }}
+            style={styles.cover}
+            contentFit="cover"
+            transition={150}
+            onError={(e) => console.log("Image failed:", restaurant.imageUrl, e)}
+          />
+        ) : (
+          <View style={[styles.cover, styles.coverPlaceholder]} />
+        )}
 
         <Text style={styles.title}>{restaurant.name}</Text>
-
-        {restaurant.description ? (
-          <Text style={styles.description} numberOfLines={3}>
-            {restaurant.description}
-          </Text>
-        ) : null}
+        {!!restaurant.description && (
+          <Text style={styles.description} numberOfLines={3}>{restaurant.description}</Text>
+        )}
 
         {/* Hours + Days + Open/Closed */}
         <View style={styles.metaRow}>
@@ -271,16 +275,27 @@ export default function RestaurantDetails() {
         </View>
       </View>
 
-      {/* Search */}
-      <View style={styles.searchBox}>
-        <Ionicons name="search-outline" size={18} />
-        <TextInput
-          value={query}
-          onChangeText={setQuery}
-          placeholder="Search menu items"
-          style={styles.searchInput}
-          returnKeyType="search"
-          clearButtonMode="while-editing"
+      {/* Category bar (horizontal chips) */}
+      <View style={{ paddingVertical: 8 }}>
+        <FlatList
+          data={categories}
+          keyExtractor={(c) => c}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ paddingHorizontal: 12, gap: 8 }}
+          renderItem={({ item: cat }) => {
+            const active = cat === selectedCategory;
+            return (
+              <TouchableOpacity
+                onPress={() => setSelectedCategory(cat)}
+                style={[styles.chip, active ? styles.chipActive : styles.chipInactive]}
+              >
+                <Text style={[styles.chipText, active ? styles.chipTextActive : styles.chipTextInactive]}>
+                  {cat}
+                </Text>
+              </TouchableOpacity>
+            );
+          }}
         />
       </View>
 
@@ -293,7 +308,7 @@ export default function RestaurantDetails() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         ListEmptyComponent={() => (
           <View style={styles.empty}>
-            <Text>{query ? "No items match your search" : "No items available"}</Text>
+            <Text>No items available</Text>
           </View>
         )}
       />
@@ -302,21 +317,18 @@ export default function RestaurantDetails() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#fff" },
+  center: { flex: 1, alignItems: "center", justifyContent: "center" },
 
   topBar: {
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 12,
-    // paddingTop added dynamically via insets
-    paddingBottom: 10, // a touch more breathing room
+    paddingTop: Platform.select({ ios: 6, android: 4, default: 6 }),
+    paddingBottom: 10,
   },
   iconBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    alignItems: "center",
-    justifyContent: "center",
+    width: 40, height: 40, borderRadius: 20,
+    alignItems: "center", justifyContent: "center",
   },
 
   header: { paddingHorizontal: 16, paddingTop: 6, paddingBottom: 10 },
@@ -328,14 +340,8 @@ const styles = StyleSheet.create({
   metaText: { fontSize: 14, color: "#333" },
 
   statusPillBase: {
-    marginTop: 8,
-    alignSelf: "flex-start",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
+    marginTop: 8, alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 6,
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999,
   },
   statusPillOpen: { backgroundColor: "#E8F7EE" },
   statusPillClosed: { backgroundColor: "#FDEBEC" },
@@ -343,33 +349,26 @@ const styles = StyleSheet.create({
   statusTextOpen: { color: "#107C41" },
   statusTextClosed: { color: "#C62828" },
 
-  searchBox: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginHorizontal: 16,
-    marginBottom: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 12,
-    backgroundColor: "#F4F4F5",
-  },
-  searchInput: { flex: 1, fontSize: 15 },
+  // chips
+  chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, borderWidth: 1 },
+  chipActive: { backgroundColor: "#111827", borderColor: "#111827" },
+  chipInactive: { backgroundColor: "#fff", borderColor: "#E5E7EB" },
+  chipText: { fontSize: 14, fontWeight: "600" },
+  chipTextActive: { color: "#fff" },
+  chipTextInactive: { color: "#111827" },
 
   itemCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#E9E9EA",
-    gap: 12,
+    flexDirection: "row", alignItems: "center",
+    paddingHorizontal: 16, paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E9E9EA", gap: 12,
   },
   itemImage: { width: 72, height: 72, borderRadius: 10, backgroundColor: "#EEE" },
   itemImagePlaceholder: { alignItems: "center", justifyContent: "center" },
   itemInfo: { flex: 1 },
   itemName: { fontSize: 16, fontWeight: "600" },
   itemPrice: { marginTop: 4, fontSize: 14, color: "#333" },
+  catPill: { marginTop: 6, alignSelf: "flex-start", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: "#F4F4F5" },
+  catPillText: { fontSize: 12, color: "#555" },
+
   empty: { alignItems: "center", justifyContent: "center", paddingTop: 24 },
-  center: { flex: 1, alignItems: "center", justifyContent: "center" },
 });
