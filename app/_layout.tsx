@@ -1,16 +1,17 @@
+// app/_layout.tsx
 import "react-native-gesture-handler";
 import "react-native-reanimated";
 
+import React, { useEffect } from "react";
 import { SplashScreen, Slot } from "expo-router";
 import "./globals.css";
 import { useFonts } from "expo-font";
-import { useEffect } from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import * as Sentry from "@sentry/react-native";
 import useAuthStore from "@/store/auth.store";
 import { Provider as PaperProvider } from "react-native-paper";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
-import { CartProvider } from "@/store/cart"; // 👈 add this
+import { SafeAreaProvider } from "react-native-safe-area-context"; // ✅
 
 Sentry.init({
   dsn: "https://bd80887b4574dfa5981f2915c67f9052@o4509852474540032.ingest.us.sentry.io/4509852502917120",
@@ -44,15 +45,14 @@ export default Sentry.wrap(function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <PaperProvider>
-        <BottomSheetModalProvider>
-          {/* 👇 Wrap ALL routes in CartProvider so useCart() works anywhere */}
-          <CartProvider>
-            {/* Render the active route tree (tabs, auth, item, cart, etc.) */}
+      <SafeAreaProvider>
+        <PaperProvider>
+          <BottomSheetModalProvider>
+            {/* Zustand needs no provider. Just render your routes. */}
             <Slot />
-          </CartProvider>
-        </BottomSheetModalProvider>
-      </PaperProvider>
+          </BottomSheetModalProvider>
+        </PaperProvider>
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 });

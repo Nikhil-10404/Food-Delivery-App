@@ -17,6 +17,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { databases, appwriteConfig } from "@/lib/appwrite";
 import { Query, Models } from "react-native-appwrite";
+import { usePathname } from "expo-router";
 
 const DB_ID = appwriteConfig.databaseId;
 const RESTAURANTS_COLLECTION_ID = appwriteConfig.Restaurant_Collection_ID;
@@ -66,6 +67,7 @@ function dayName(idx: number) {
 
 export default function RestaurantDetails() {
   const router = useRouter();
+  const pathname = usePathname();
   const params = useLocalSearchParams<{ id?: string }>();
   const restaurantId = params.id as string;
 
@@ -155,12 +157,13 @@ export default function RestaurantDetails() {
     <TouchableOpacity
       onPress={() => {
         // 👉 go to Item Details with restaurant context
-        router.push({
+       router.push({
   pathname: "/item/[id]",
   params: {
     id: item.$id,
-    restaurantId,                         // keep context for per-restaurant cart
+    restaurantId,                         // keep cart context
     restaurantName: restaurant?.name ?? "",
+    back: pathname,                       // 👈 tell item page where to go "back" to
   },
 });
       }}
