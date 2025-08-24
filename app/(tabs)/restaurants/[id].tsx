@@ -5,7 +5,6 @@ import {
   View,
   Text,
   FlatList,
-  TextInput,
   TouchableOpacity,
   ActivityIndicator,
   RefreshControl,
@@ -29,7 +28,7 @@ type MenuItemDoc = Models.Document & {
   photoId?: string;
   restaurant: string;
   description?: string;
-  category?: string; // <-- NEW
+  category?: string;
 };
 
 type RestaurantDoc = Models.Document & {
@@ -49,23 +48,18 @@ function parseHHMM(hhmm?: string) {
   if (Number.isNaN(h) || Number.isNaN(m)) return null;
   return { h, m };
 }
-
 function isOpenNow(r: RestaurantDoc, nowDate: Date = new Date()) {
   const day = nowDate.getDay();
   const openDays = r.opendays && r.opendays.length ? r.opendays : [0, 1, 2, 3, 4, 5, 6];
   if (!openDays.includes(day)) return false;
-
   const start = parseHHMM(r.openingsstart);
   const end = parseHHMM(r.openingend);
   if (!start || !end) return false;
-
   const nowMin = nowDate.getHours() * 60 + nowDate.getMinutes();
   const startMin = start.h * 60 + start.m;
   const endMin = end.h * 60 + end.m;
-
   return startMin <= endMin ? nowMin >= startMin && nowMin <= endMin : nowMin >= startMin || nowMin <= endMin;
 }
-
 function dayName(idx: number) {
   return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][idx] || "";
 }
@@ -81,19 +75,15 @@ export default function RestaurantDetails() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // category state
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
-
   const open = useMemo(() => (restaurant ? isOpenNow(restaurant) : false), [restaurant]);
 
-  // Build unique category list from items
   const categories = useMemo(() => {
     const set = new Set<string>();
     items.forEach((it) => set.add((it.category || "Others").trim()));
     return ["All", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
   }, [items]);
 
-  // Filter by category
   const filteredItems = useMemo(() => {
     if (selectedCategory === "All") return items;
     return items.filter((it) => (it.category || "Others") === selectedCategory);
@@ -114,24 +104,15 @@ export default function RestaurantDetails() {
 
       // Prefer embedded relation if available
       let embedded: MenuItemDoc[] | null = null;
-      const rel = (rDoc as any)?.menuItems;
+      const rel = (rDoc as any)?.menuItems || (rDoc as any)?.menuitems;
       if (Array.isArray(rel) && rel.length > 0) {
         const first = rel[0] as any;
         if (first && typeof first === "object" && first.name !== undefined) {
           embedded = (rel as any[]).filter(Boolean).map((m: any) => ({
-            $id: m.$id,
-            $databaseId: m.$databaseId,
-            $collectionId: m.$collectionId,
-            $createdAt: m.$createdAt,
-            $updatedAt: m.$updatedAt,
-            $permissions: m.$permissions,
-            $sequence: m.$sequence,
-            name: m.name,
-            price: Number(m.price),
-            photoId: m.photoId,
-            restaurant: m.restaurant,
-            description: m.description,
-            category: m.category, // <-- NEW
+            $id: m.$id, $databaseId: m.$databaseId, $collectionId: m.$collectionId,
+            $createdAt: m.$createdAt, $updatedAt: m.$updatedAt, $permissions: m.$permissions, $sequence: m.$sequence,
+            name: m.name, price: Number(m.price), photoId: m.photoId, restaurant: m.restaurant,
+            description: m.description, category: m.category,
           })) as MenuItemDoc[];
         }
       }
@@ -147,7 +128,6 @@ export default function RestaurantDetails() {
         setItems((list.documents || []).map(d => ({ ...d, price: Number(d.price) })));
       }
 
-      // default category = All
       setSelectedCategory("All");
     } catch (e: any) {
       console.error("Failed to load restaurant details:", e);
@@ -172,7 +152,19 @@ export default function RestaurantDetails() {
   }, [fetchData]);
 
   const renderItem = ({ item }: { item: MenuItemDoc }) => (
-    <TouchableOpacity onPress={() => (router as any).push(`/item/${item.$id}`)}>
+    <TouchableOpacity
+      onPress={() => {
+        // 👉 go to Item Details with restaurant context
+        router.push({
+  pathname: "/item/[id]",
+  params: {
+    id: item.$id,
+    restaurantId,                         // keep context for per-restaurant cart
+    restaurantName: restaurant?.name ?? "",
+  },
+});
+      }}
+    >
       <View style={styles.itemCard}>
         {item.photoId ? (
           <ExpoImage
@@ -224,7 +216,14 @@ export default function RestaurantDetails() {
           <Ionicons name="chevron-back" size={24} />
         </TouchableOpacity>
         <View style={{ flex: 1 }} />
-        <TouchableOpacity onPress={() => (router as any).push("/card")} style={styles.iconBtn}>
+        <TouchableOpacity
+          // 👉 go to this restaurant's cart
+          onPress={() => router.push({
+  pathname: "/cart/[restaurantId]",
+  params: { restaurantId },
+})}
+          style={styles.iconBtn}
+        >
           <Ionicons name="cart-outline" size={24} />
         </TouchableOpacity>
       </View>
@@ -275,7 +274,7 @@ export default function RestaurantDetails() {
         </View>
       </View>
 
-      {/* Category bar (horizontal chips) */}
+      {/* Category bar */}
       <View style={{ paddingVertical: 8 }}>
         <FlatList
           data={categories}
@@ -326,10 +325,7 @@ const styles = StyleSheet.create({
     paddingTop: Platform.select({ ios: 6, android: 4, default: 6 }),
     paddingBottom: 10,
   },
-  iconBtn: {
-    width: 40, height: 40, borderRadius: 20,
-    alignItems: "center", justifyContent: "center",
-  },
+  iconBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
 
   header: { paddingHorizontal: 16, paddingTop: 6, paddingBottom: 10 },
   cover: { width: "100%", height: 160, borderRadius: 12, backgroundColor: "#EEE" },
@@ -338,7 +334,6 @@ const styles = StyleSheet.create({
   description: { fontSize: 14, color: "#444", marginTop: 4 },
   metaRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
   metaText: { fontSize: 14, color: "#333" },
-
   statusPillBase: {
     marginTop: 8, alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 6,
     paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999,
@@ -349,7 +344,6 @@ const styles = StyleSheet.create({
   statusTextOpen: { color: "#107C41" },
   statusTextClosed: { color: "#C62828" },
 
-  // chips
   chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, borderWidth: 1 },
   chipActive: { backgroundColor: "#111827", borderColor: "#111827" },
   chipInactive: { backgroundColor: "#fff", borderColor: "#E5E7EB" },

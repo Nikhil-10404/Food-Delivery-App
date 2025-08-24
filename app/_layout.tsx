@@ -1,7 +1,7 @@
 import "react-native-gesture-handler";
 import "react-native-reanimated";
 
-import { SplashScreen, Stack } from "expo-router";
+import { SplashScreen, Slot } from "expo-router";
 import "./globals.css";
 import { useFonts } from "expo-font";
 import { useEffect } from "react";
@@ -10,6 +10,7 @@ import * as Sentry from "@sentry/react-native";
 import useAuthStore from "@/store/auth.store";
 import { Provider as PaperProvider } from "react-native-paper";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
+import { CartProvider } from "@/store/cart"; // 👈 add this
 
 Sentry.init({
   dsn: "https://bd80887b4574dfa5981f2915c67f9052@o4509852474540032.ingest.us.sentry.io/4509852502917120",
@@ -45,7 +46,11 @@ export default Sentry.wrap(function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <PaperProvider>
         <BottomSheetModalProvider>
-          <Stack screenOptions={{ headerShown: false }} />
+          {/* 👇 Wrap ALL routes in CartProvider so useCart() works anywhere */}
+          <CartProvider>
+            {/* Render the active route tree (tabs, auth, item, cart, etc.) */}
+            <Slot />
+          </CartProvider>
         </BottomSheetModalProvider>
       </PaperProvider>
     </GestureHandlerRootView>

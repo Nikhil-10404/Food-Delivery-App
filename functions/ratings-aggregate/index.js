@@ -1,69 +1,34 @@
-import { Client, Databases } from "node-appwrite";
+import { Client, Databases, Query } from "node-appwrite";
 
-/**
- * HTTP function
- * Request: GET /?itemId=abc123
- * Response: { avg: number, count: number }
- */
 export default async ({ req, res, log, error }) => {
   try {
-    // Basic method check
-    if (req.method !== "GET") {
-      return res.json({ error: "Method not allowed" }, 405);
-    }
-
+    if (req.method !== "GET") return res.json({ error: "Method not allowed" }, 405);
     const itemId = req.query?.itemId;
-    if (!itemId || typeof itemId !== "string") {
-      return res.json({ error: "Missing itemId" }, 400);
+    if (!itemId || typeof itemId !== "string") return res.json({ error: "Missing itemId" }, 400);
+
+    const endpoint  = "https://cloud.appwrite.io/v1"; // <— hardcoded
+    const projectId = "689f4acb0019f2d2bc66"; // auto-injected
+    const apiKey    = "standard_7de18e47d6d481575ef51b7d22e9434c942b3121769a2f608d03c3a366211f00956c477a69171b4f7856e71e4b617f59d619485bfc8efa76b6be4e526a756750309429de92926a0a9d08e9e1e00633c63e2026e967c51cd1164a71c8f75d48742c7a4ba784203f0f60bfced5f74677045daa0d878609ebdbbaea7d0d8ff6933c";             // you set this
+    const DB_ID     = "689f4cf400382bb1fa55";
+    const RATINGS   = "68ab0d4d003321696043";
+
+    if (!apiKey || !DB_ID || !RATINGS || !projectId) {
+      return res.json({ error: "Missing env vars" }, 500);
     }
 
-    // Init Appwrite SDK using the function's injected env
-    const client = new Client()
-      .setEndpoint(process.env.APPWRITE_FUNCTION_ENDPOINT)
-      .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
-      .setKey(process.env.APPWRITE_API_KEY); // create API key with DB read access
-
+    const client = new Client().setEndpoint(endpoint).setProject(projectId).setKey(apiKey);
     const databases = new Databases(client);
 
-    const DB_ID = process.env.DB_ID;
-    const RATINGS = process.env.RATINGS_COLLECTION_ID;
-
-    if (!DB_ID || !RATINGS) {
-      return res.json({ error: "Missing env: DB_ID or RATINGS_COLLECTION_ID" }, 500);
-    }
-
-    // Paginate through ratings for this item
-    let sum = 0;
-    let count = 0;
-    let cursor = undefined;
-
+    let sum = 0, count = 0, cursor;
     while (true) {
-      const queries = [
-        `equal("itemId", ["${itemId}"])`,
-        "limit(100)",
-      ];
-      if (cursor) queries.push(`cursorAfter("${cursor}")`);
-
+      const queries = [Query.equal("itemId", itemId), Query.limit(100)];
+      if (cursor) queries.push(Query.cursorAfter(cursor));
       const page = await databases.listDocuments(DB_ID, RATINGS, queries);
-
-      for (const doc of page.documents) {
-        const v = Number(doc.value);
-        if (!Number.isNaN(v)) {
-          sum += v;
-          count += 1;
-        }
-      }
-
-      if (!page.documents.length || page.documents.length < 100) break;
+      for (const d of page.documents) { const v = Number(d.value); if (!Number.isNaN(v)) { sum += v; count++; } }
+      if (page.documents.length < 100) break;
       cursor = page.documents[page.documents.length - 1].$id;
     }
-
-    const avg = count ? sum / count : 0;
-
-    // Cache hints (optional)
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Cache-Control", "public, max-age=15"); // 15s client cache
-    return res.json({ avg, count });
+    return res.json({ avg: count ? sum / count : 0, count });
   } catch (e) {
     error(e?.message || String(e));
     return res.json({ error: "Internal error" }, 500);
