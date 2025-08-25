@@ -177,15 +177,8 @@ const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
   // Back: prefer true back; if no history, go to restaurant details
    const onBack = () => {
   // @ts-ignore expo-router exposes canGoBack on native
-  if (router.canGoBack?.()) {
-    router.back();
-  } else if (safeBack) {
-    router.replace(safeBack as any);   // 👈 cast to satisfy Href typing
-  } else if (rId) {
     router.replace(`/restaurants/${rId}`);
-  } else {
-    router.replace("/");
-  }
+  
 };
 
 
@@ -282,7 +275,7 @@ const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
       <View
         style={[
           styles.topBar,
-          { paddingTop: Math.max(insets.top * 0.6, 10), marginBottom: 8 }, // lower the icons
+          { paddingTop: Math.max(insets.top * 2, 10), marginBottom: 30 }, // lower the icons
         ]}
       >
         <TouchableOpacity onPress={onBack} style={[styles.iconBtn, { marginTop: 6 }]}>

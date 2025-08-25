@@ -23,7 +23,11 @@ export const appwriteConfig = {
   Restaurant_Collection_ID:"68a8499900095c6a7583",
   menuItemsCollectionId:"68a9e32e00019e153f95",
   ratingsCollectionId:"68ab0d4d003321696043",
-   ratingsAggregateUrl: "https://68ab16a60004ab6951cf.fra.appwrite.run"
+   ratingsAggregateUrl: "https://68ab16a60004ab6951cf.fra.appwrite.run",
+   platformCollectionId:"68ac5bd000040b4f38e7",
+   couponsCollectionId:"68ac5c54000559cc6654",
+   instructionsCollectionId:"68ac5d8b002e6ef42356",
+   PLATFORM_DOC_ID:"68ac7986002859f00561"
 };
 
 export const client = new Client();

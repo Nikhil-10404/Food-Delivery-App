@@ -1,6 +1,7 @@
 import React, { useMemo } from "react";
 import { View, Text, TextInput, TouchableOpacity, Platform } from "react-native";
 import CartButton from "@/components/CardButton";
+import LocationPicker from "@/components/location/LocationPicker";
 
 const COLORS = {
   text: "#181A1F",
@@ -42,7 +43,7 @@ export default function HomeHeaderLight({
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
         <View>
           <Text style={{ color: COLORS.text, fontSize: 34, fontWeight: "800" }}>Foodie</Text>
-          <Text style={{ color: COLORS.sub, fontSize: 12, fontWeight: "600", marginTop: 2 }}>NIT HAMIRPUR • {caption}</Text>
+          <LocationPicker />
         </View>
         <CartButton />
       </View>

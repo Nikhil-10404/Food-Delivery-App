@@ -76,8 +76,6 @@ export default function TabLayout() {
           tabBarIcon: ({ focused }) => <TabBarIcon title="Profile" icon={images.person} focused={focused} />,
         }}
       />
-      {/* Hide deep screens from the tab bar */}
-      <Tabs.Screen name="restaurants/[id]" options={{ href: null }} />
     </Tabs>
   );
 }
