@@ -56,17 +56,10 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="search"
+        name="order"
         options={{
-          title: "Seacrh",
-          tabBarIcon: ({ focused }) => <TabBarIcon title="Search" icon={images.search} focused={focused} />,
-        }}
-      />
-      <Tabs.Screen
-        name="card"
-        options={{
-          title: "Cart",
-          tabBarIcon: ({ focused }) => <TabBarIcon title="Cart" icon={images.bag} focused={focused} />,
+          title: "Orders",
+          tabBarIcon: ({ focused }) => <TabBarIcon title="Orders" icon={images.bag} focused={focused} />,
         }}
       />
       <Tabs.Screen

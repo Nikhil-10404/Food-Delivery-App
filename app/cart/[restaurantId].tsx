@@ -326,7 +326,7 @@ const freePct = Math.min(1, subTotal / freeDeliveryThreshold);
       `Items: ${restLines.length}\nSubtotal: ₹${subTotal.toFixed(0)}\nTotal: ₹${total.toFixed(0)}\n\nPromo: ${validCoupon?.code || "-"}\nNotes: ${note || "-"}`,
       [
         { text: "Cancel", style: "cancel" },
-        { text: "Proceed", onPress: () => console.log("Proceed to payment…") },
+      { text: "Proceed", onPress: () => router.push({ pathname: "/checkout/[restaurantId]", params: { restaurantId: rid } }) },
       ]
     );
   };

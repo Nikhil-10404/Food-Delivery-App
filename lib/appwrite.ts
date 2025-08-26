@@ -27,7 +27,9 @@ export const appwriteConfig = {
    platformCollectionId:"68ac5bd000040b4f38e7",
    couponsCollectionId:"68ac5c54000559cc6654",
    instructionsCollectionId:"68ac5d8b002e6ef42356",
-   PLATFORM_DOC_ID:"68ac7986002859f00561"
+   PLATFORM_DOC_ID:"68ac7986002859f00561",
+   ordersCollectionId:"68acb7a0000fb463f777",
+   addressesCollectionId:"68acc23a00207c5e0335"
 };
 
 export const client = new Client();

@@ -43,7 +43,7 @@ export default function HomeHeaderLight({
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
         <View>
           <Text style={{ color: COLORS.text, fontSize: 34, fontWeight: "800" }}>Foodie</Text>
-          <LocationPicker />
+          <Text style={{ color: COLORS.sub, fontSize: 12, fontWeight: "600", marginTop: 2 }}>NIT HAMIRPUR • {caption}</Text>
         </View>
         <CartButton />
       </View>
