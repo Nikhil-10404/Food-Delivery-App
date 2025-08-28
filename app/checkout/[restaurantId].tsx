@@ -25,6 +25,7 @@ import * as WebBrowser from "expo-web-browser";
 import { createPaymentLink } from "@/lib/payments";
 import PaymentWait from "@/components/checkout/PaymentWait"; // kept, but we won't show after close
 import { calculateTotals } from "@/lib/totals";
+import { payPendingUPI } from "@/lib/payments-client"; 
 
 /* ---------- Theme ---------- */
 const PRIMARY = "#111827";
@@ -342,156 +343,149 @@ export default function CheckoutScreen() {
   };
   const cancelCountdown = () => setShowCountdown(false);
 
-  const doPlaceOrder = useCallback(async () => {
-    setShowCountdown(false);
-    if (!ORDERS_COLLECTION_ID || !selectedAddress || !userId) return;
+ const doPlaceOrder = useCallback(async () => {
+  setShowCountdown(false);
+  if (!ORDERS_COLLECTION_ID || !selectedAddress || !userId) return;
 
-    setPlacing(true);
-    try {
-      const itemsArr = restLines.map((l) => ({
-        id: l.item.id,
-        name: l.item.name,
-        price: Number(l.item.price),
-        qty: l.qty,
-      }));
+  setPlacing(true);
+  try {
+    const itemsArr = restLines.map((l) => ({
+      id: l.item.id,
+      name: l.item.name,
+      price: Number(l.item.price),
+      qty: l.qty,
+    }));
 
-      const payload: Partial<OrderDoc> = {
-        userId,
-        restaurantId: rid,
-        restaurantName,
-        items: JSON.stringify(itemsArr),
-        subTotal,
-        platformFee,
-        deliveryFee,
-        gst,
-        discount: 0,
-        total,
-        address: JSON.stringify({
-          fullName: selectedAddress.fullName,
-          phone: selectedAddress.phone,
-          line1: selectedAddress.line1,
-          landmark: selectedAddress.landmark || "",
-          pincode: selectedAddress.pincode,
-          city: selectedAddress.city,
-          state: selectedAddress.state,
-          country: selectedAddress.country,
-          isDefault: !!selectedAddress.isDefault,
-        }),
-        paymentMethod: method!,
-        paymentStatus: "pending",
-        status: method === "UPI" ? ("pending_payment" as any) : "placed",
-      };
+    const payload: Partial<OrderDoc> = {
+      userId,
+      restaurantId: rid,
+      restaurantName,
+      items: JSON.stringify(itemsArr),
+      subTotal,
+      platformFee,
+      deliveryFee,
+      gst,
+      discount: 0,
+      total,
+      address: JSON.stringify({
+        fullName: selectedAddress.fullName,
+        phone: selectedAddress.phone,
+        line1: selectedAddress.line1,
+        landmark: selectedAddress.landmark || "",
+        pincode: selectedAddress.pincode,
+        city: selectedAddress.city,
+        state: selectedAddress.state,
+        country: selectedAddress.country,
+        isDefault: !!selectedAddress.isDefault,
+      }),
+      paymentMethod: method!,
+      paymentStatus: "pending",
+      status: method === "UPI" ? ("pending_payment" as any) : "placed",
+    };
 
-      if (method === "UPI") {
-        // Reuse an existing pending order for this user+restaurant if present
-        let referenceId = pendingUPIRef;
+    if (method === "UPI") {
+      // ---------------- UPI FLOW ----------------
+      // 1) Create (once) or reuse a pending order in Appwrite
+      let referenceId = pendingUPIRef;
 
-        if (!referenceId) {
-          try {
-            const res = await databases.listDocuments<OrderDoc>(
-              DB_ID,
-              ORDERS_COLLECTION_ID,
-              [
-                Query.equal("userId", userId),
-                Query.equal("restaurantId", rid),
-                Query.equal("paymentMethod", "UPI"),
-                Query.equal("status", "pending_payment"),
-                Query.orderDesc("$createdAt"),
-                Query.limit(1),
-              ]
-            );
-            const existing = res.documents?.[0];
-            if (existing?.$id) {
-              referenceId = existing.$id;
-              setPendingUPIRef(existing.$id);
-            }
-          } catch {}
-        }
-
-        if (!referenceId) {
-          const created = await databases.createDocument<OrderDoc>(
-            DB_ID,
-            ORDERS_COLLECTION_ID,
-            "unique()",
-            payload as any
-          );
-          await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, created.$id, {
-            referenceId: created.$id,
-          });
-          referenceId = created.$id;
-          setPendingUPIRef(created.$id);
-        } else {
-          // sync latest totals/items on retry
-          await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, referenceId, {
-            total,
-            items: JSON.stringify(itemsArr),
-          });
-        }
-
-        // Create/open payment link
+      if (!referenceId) {
         try {
-          const link = await createPaymentLink({
-            referenceId,
-            amount: total,
-            name: selectedAddress.fullName,
-          });
-
-          if (link?.short_url) {
-            // resolves when user closes Razorpay tab
-            await WebBrowser.openBrowserAsync(link.short_url);
+          const res = await databases.listDocuments<OrderDoc>(DB_ID, ORDERS_COLLECTION_ID, [
+            Query.equal("userId", userId),
+            Query.equal("restaurantId", rid),
+            Query.equal("paymentMethod", "UPI"),
+            Query.equal("status", "pending_payment"),
+            Query.orderDesc("$createdAt"),
+            Query.limit(1),
+          ]);
+          const existing = res.documents?.[0];
+          if (existing?.$id) {
+            referenceId = existing.$id;
+            setPendingUPIRef(existing.$id);
           }
-
-          // User closed or navigated back → show Pay button again; no waiting overlay.
-          setWaitingRef(null);
-          setShowWait(false);
-        } catch (err: any) {
-          Alert.alert(
-            "UPI payment error",
-            err?.message || "Could not start payment. Please try again."
-          );
-        }
-
-        setPlacing(false);
-        return;
+        } catch {}
       }
 
-      // ---------- COD FLOW ----------
-      const created = await databases.createDocument<OrderDoc>(
-        DB_ID,
-        ORDERS_COLLECTION_ID,
-        "unique()",
-        payload as any
-      );
-      await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, created.$id, {
-        referenceId: created.$id,
+      if (!referenceId) {
+        // create the order document first (no cart clear)
+        const created = await databases.createDocument<OrderDoc>(
+          DB_ID,
+          ORDERS_COLLECTION_ID,
+          "unique()",
+          payload as any
+        );
+        await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, created.$id, {
+          referenceId: created.$id,
+        });
+        referenceId = created.$id;
+        setPendingUPIRef(created.$id);
+      } else {
+        // optional: refresh totals/items in case cart changed
+        await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, referenceId, {
+          total,
+          items: JSON.stringify(itemsArr),
+        });
+      }
+
+      // 2) Launch Razorpay via helper (with deep-link return)
+      await payPendingUPI({
+        referenceId,
+        amount: total,
+        customerName: selectedAddress.fullName,
+        onPaid: () => {
+          setPendingUPIRef(null);
+          clearRestaurant(rid); // ✅ empty cart on success
+          Alert.alert("Payment received 🎉", "Your order is confirmed.", [
+            { text: "View Order", onPress: () => router.replace(`/orders/${referenceId}`) }, // go to this order
+          ]);
+        },
+        onStillPending: () => {
+          // User closed or payment still pending → just show “Pay with UPI” again.
+          // No overlay, no cancel needed.
+        },
       });
 
-      setLastOrderId(created.$id);
-      clearRestaurant(rid);
-      Alert.alert("Order placed 🎉", "Your order has been placed successfully!", [
-        { text: "View Order", onPress: () => router.replace("/order") },
-        { text: "OK", style: "cancel" },
-      ]);
-    } catch (e: any) {
-      Alert.alert("Failed", e?.message || "Could not place the order.");
-    } finally {
       setPlacing(false);
+      return; // stop here (no COD path)
     }
-  }, [
-    ORDERS_COLLECTION_ID,
-    selectedAddress,
-    userId,
-    rid,
-    restaurantName,
-    restLines,
-    subTotal,
-    platformFee,
-    deliveryFee,
-    gst,
-    total,
-    method,
-    pendingUPIRef,
-  ]);
+
+    // ---------- COD FLOW ----------
+    const created = await databases.createDocument<OrderDoc>(
+      DB_ID,
+      ORDERS_COLLECTION_ID,
+      "unique()",
+      payload as any
+    );
+    await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, created.$id, {
+      referenceId: created.$id,
+    });
+
+    setLastOrderId(created.$id);
+    clearRestaurant(rid);
+    Alert.alert("Order placed 🎉", "Your order has been placed successfully!", [
+      { text: "View Order", onPress: () => router.replace("/order") },
+      { text: "OK", style: "cancel" },
+    ]);
+  } catch (e: any) {
+    Alert.alert("Failed", e?.message || "Could not place the order.");
+  } finally {
+    setPlacing(false);
+  }
+}, [
+  ORDERS_COLLECTION_ID,
+  selectedAddress,
+  userId,
+  rid,
+  restaurantName,
+  restLines,
+  subTotal,
+  platformFee,
+  deliveryFee,
+  gst,
+  total,
+  method,
+  pendingUPIRef,
+]);
 
   const cancelOrder = useCallback(async () => {
     if (!ORDERS_COLLECTION_ID || !lastOrderId) return;

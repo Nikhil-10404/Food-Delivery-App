@@ -7,6 +7,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { databases, appwriteConfig } from "@/lib/appwrite";
 import type { Models } from "react-native-appwrite";
 
+import { payPendingUPI } from "@/lib/payments-client";    // 👈 NEW
+import { useCart } from "@/store/cart";                    // 👈 NEW
+
 const DB_ID = appwriteConfig.databaseId;
 const ORDERS_COLLECTION_ID =
   (appwriteConfig as any).ordersCollectionId ||
@@ -17,15 +20,17 @@ const MUTED   = "#6B7280";
 const BORDER  = "#E5E7EB";
 const ACCENT  = "#FE8C00";
 const RED     = "#DC2626";
+const GREEN   = "#16A34A";
 
 type RawOrderDoc = Models.Document & {
+  restaurantId: string;                // 👈 ensure this exists in your Orders collection
   restaurantName: string;
-  items: any;          // may be string (JSON) or array
+  items: any;                          // may be string (JSON) or array
   total: number; subTotal: number; platformFee: number; deliveryFee: number; gst: number; discount: number;
-  address: any;        // may be string (JSON) or object
+  address: any;                        // may be string (JSON) or object
   paymentMethod: "COD" | "UPI" | "CARD" | string;
   paymentStatus: "pending" | "paid" | "failed" | string;
-  status: "placed" | "accepted" | "preparing" | "on_the_way" | "delivered" | "cancelled" | string;
+  status: "placed" | "accepted" | "preparing" | "on_the_way" | "delivered" | "cancelled" | "pending_payment" | string;
   $createdAt: string;
 };
 
@@ -50,28 +55,37 @@ export default function OrderDetails() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
   const oid = String(id || "");
-  
+
+  const { clearRestaurant } = useCart();                 // 👈 for emptying cart after successful pay
 
   const [doc, setDoc] = useState<RawOrderDoc | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyCancel, setBusyCancel] = useState(false);
+  const [busyPay, setBusyPay] = useState(false);    // 👈 NEW
+
+  useEffect(() => {
+    if (doc?.paymentStatus === "paid" && (doc as any)?.restaurantId) {
+      clearRestaurant((doc as any).restaurantId); // ✅ self-heal cart on paid orders
+    }
+  }, [doc?.paymentStatus, (doc as any)?.restaurantId]);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await databases.getDocument<RawOrderDoc>(DB_ID, ORDERS_COLLECTION_ID, oid);
+      setDoc(d);
+    } catch (e) {
+      console.warn("[OrderDetails] load failed", (e as any)?.message || e);
+    } finally {
+      setLoading(false);
+    }
+  }, [oid]);
 
   useEffect(() => {
     let mounted = true;
-    (async () => {
-      setLoading(true);
-      try {
-        const d = await databases.getDocument<RawOrderDoc>(DB_ID, ORDERS_COLLECTION_ID, oid);
-        if (!mounted) return;
-        setDoc(d);
-      } catch (e) {
-        console.warn("[OrderDetails] load failed", (e as any)?.message || e);
-      } finally {
-        if (mounted) setLoading(false);
-      }
-    })();
+    (async () => { if (mounted) await reload(); })();
     return () => { mounted = false; };
-  }, [oid]);
+  }, [reload]);
 
   const created = useMemo(
     () => (doc ? new Date(doc.$createdAt).toLocaleString() : ""),
@@ -88,11 +102,15 @@ export default function OrderDetails() {
     [doc?.address]
   );
 
-  const canCancelUPI = doc?.paymentMethod === "UPI" && doc?.paymentStatus === "pending";
-const canCancelCOD = doc?.paymentMethod === "COD" && doc?.status === "placed";
-const canCancel = !!(canCancelUPI || canCancelCOD);
+  // Cancellation flags
+  const canCancelUPI = doc?.paymentMethod === "UPI" && (doc?.status === "pending_payment" || doc?.paymentStatus === "pending");
+  const canCancelCOD = doc?.paymentMethod === "COD" && doc?.status === "placed";
+  const canCancel = !!(canCancelUPI || canCancelCOD);
 
-  const cancelOrder = useCallback(async () => {
+  // Show Pay via UPI when it's a pending UPI order
+  const canPayUPI = doc?.paymentMethod === "UPI" && doc?.status === "pending_payment";
+
+const cancelOrder = useCallback(async () => {
   if (!doc) return;
 
   Alert.alert("Cancel order?", "This cannot be undone.", [
@@ -105,12 +123,10 @@ const canCancel = !!(canCancelUPI || canCancelCOD);
           setBusyCancel(true);
 
           if (canCancelUPI) {
-            // Uses your backend to mark: status=cancelled, paymentStatus=failed
-            const base = process.env.EXPO_PUBLIC_PAYMENTS_URL || "https://payment-services-d0x2.onrender.com";
-            const res = await fetch(`${base}/api/payments/cancel/${doc.$id}`, { method: "POST" });
-            if (!res.ok) throw new Error("Cancel request failed");
+            const base = process.env.EXPO_PUBLIC_PAYMENTS_URL || 'https://payment-services-d0x2.onrender.com';
+            const res = await fetch(`${base}/api/orders/cancel/${doc.$id}`, { method: 'POST' });
+            if (!res.ok) throw new Error('Cancel request failed');
           } else if (canCancelCOD) {
-            // For COD (not paid yet), just remove the doc
             await databases.deleteDocument(DB_ID, ORDERS_COLLECTION_ID, doc.$id);
           }
 
@@ -125,6 +141,35 @@ const canCancel = !!(canCancelUPI || canCancelCOD);
     },
   ]);
 }, [doc, canCancelUPI, canCancelCOD]);
+
+
+  // 👇 NEW: Pay via UPI for an existing pending order
+  const payNow = useCallback(async () => {
+    if (!doc) return;
+    try {
+      setBusyPay(true);
+      await payPendingUPI({
+        referenceId: doc.$id,
+        amount: doc.total,
+        customerName: address.fullName,
+        onPaid: async () => {
+          try {
+            // empty the cart for this restaurant
+            if (doc.restaurantId) clearRestaurant(doc.restaurantId);
+          } catch {}
+          Alert.alert("Payment received 🎉", "Your order is confirmed.");
+          await reload();                    // refresh doc → should now be paid
+          router.replace(`/orders/${doc.$id}`); // stay on details, now as paid
+        },
+        onStillPending: async () => {
+          // just refresh the doc so the latest status is shown
+          await reload();
+        },
+      });
+    } finally {
+      setBusyPay(false);
+    }
+  }, [doc, address?.fullName, clearRestaurant, reload, router]);
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: "#fff", paddingTop: Math.max(insets.top * 0.3, 0) }}>
@@ -150,7 +195,7 @@ const canCancel = !!(canCancelUPI || canCancelCOD);
           <FlatList
             data={items}
             keyExtractor={(i, idx) => String((i as any)?.id ?? idx)}
-            contentContainerStyle={{ padding: 16, paddingBottom: 90 }}
+            contentContainerStyle={{ padding: 16, paddingBottom: 120 }}
             ListHeaderComponent={
               <View style={styles.card}>
                 <Text style={styles.title}>{doc.restaurantName || "Order"}</Text>
@@ -202,24 +247,37 @@ const canCancel = !!(canCancelUPI || canCancelCOD);
             }
           />
 
-          {/* Sticky cancel button (only when cancellable) */}
-          {/* Sticky cancel button (UPI pending or COD placed) */}
-{canCancel ? (
-  <View style={styles.sticky}>
-    <TouchableOpacity
-      onPress={cancelOrder}
-      activeOpacity={0.9}
-      style={[styles.cancelBtn, busyCancel && { opacity: 0.7 }]}
-      disabled={busyCancel}
-    >
-      <Ionicons name="close-circle-outline" size={18} color="#fff" />
-      <Text style={styles.cancelText}>{busyCancel ? "Cancelling…" : "Cancel Order"}</Text>
-    </TouchableOpacity>
-  </View>
-) : null}
- </>
+          {/* Sticky actions */}
+          {(canPayUPI || canCancel) ? (
+            <View style={styles.sticky}>
+              {canPayUPI ? (
+                <TouchableOpacity
+                  onPress={payNow}
+                  activeOpacity={0.9}
+                  style={[styles.actionBtn, { backgroundColor: GREEN, marginBottom: 8 }, busyPay && { opacity: 0.7 }]}
+                  disabled={busyPay}
+                >
+                  <Ionicons name="qr-code-outline" size={18} color="#fff" />
+                  <Text style={styles.actionText}>{busyPay ? "Opening…" : "Pay via UPI"}</Text>
+                </TouchableOpacity>
+              ) : null}
+
+              {canCancel ? (
+                <TouchableOpacity
+                  onPress={cancelOrder}
+                  activeOpacity={0.9}
+                  style={[styles.actionBtn, { backgroundColor: RED }, busyCancel && { opacity: 0.7 }]}
+                  disabled={busyCancel}
+                >
+                  <Ionicons name="close-circle-outline" size={18} color="#fff" />
+                  <Text style={styles.actionText}>{busyCancel ? "Cancelling…" : "Cancel Order"}</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null}
+        </>
       )}
- </SafeAreaView>
+    </SafeAreaView>
   );
 }
 
@@ -239,6 +297,6 @@ const styles = StyleSheet.create({
   total: { fontSize: 16, fontWeight: "900", color: PRIMARY },
 
   sticky: { position: "absolute", left: 0, right: 0, bottom: 0, padding: 12, backgroundColor: "#fff", borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: BORDER },
-  cancelBtn: { backgroundColor: RED, borderRadius: 14, paddingVertical: 14, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8 },
-  cancelText: { color: "#fff", fontSize: 16, fontWeight: "900" },
+  actionBtn: { borderRadius: 14, paddingVertical: 14, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8 },
+  actionText: { color: "#fff", fontSize: 16, fontWeight: "900" },
 });
