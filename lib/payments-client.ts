@@ -17,7 +17,7 @@ export async function payPendingUPI({
   onStillPending?: () => void;
 }) {
   try {
-    const callbackUrl = Linking.createURL(`/order/${referenceId}`);
+    const callbackUrl = Linking.createURL(`/orders/${referenceId}`);
 
     const link = await createPaymentLink({
       referenceId,

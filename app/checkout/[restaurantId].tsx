@@ -435,9 +435,7 @@ export default function CheckoutScreen() {
         onPaid: () => {
           setPendingUPIRef(null);
           clearRestaurant(rid); // ✅ empty cart on success
-          Alert.alert("Payment received 🎉", "Your order is confirmed.", [
-            { text: "View Order", onPress: () => router.replace(`/orders/${referenceId}`) }, // go to this order
-          ]);
+          Alert.alert("Payment received 🎉", "Your order is confirmed.");
         },
         onStillPending: () => {
           // User closed or payment still pending → just show “Pay with UPI” again.
