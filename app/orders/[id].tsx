@@ -50,6 +50,7 @@ export default function OrderDetails() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
   const oid = String(id || "");
+  
 
   const [doc, setDoc] = useState<RawOrderDoc | null>(null);
   const [loading, setLoading] = useState(true);
@@ -87,30 +88,43 @@ export default function OrderDetails() {
     [doc?.address]
   );
 
-  const canCancel = doc?.status === "placed" && doc?.paymentStatus === "pending";
+  const canCancelUPI = doc?.paymentMethod === "UPI" && doc?.paymentStatus === "pending";
+const canCancelCOD = doc?.paymentMethod === "COD" && doc?.status === "placed";
+const canCancel = !!(canCancelUPI || canCancelCOD);
 
-  const onCancel = useCallback(async () => {
-    if (!doc) return;
-    Alert.alert("Cancel order?", "This will remove the order permanently.", [
-      { text: "No", style: "cancel" },
-      {
-        text: "Yes, cancel",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            setBusyCancel(true);
+  const cancelOrder = useCallback(async () => {
+  if (!doc) return;
+
+  Alert.alert("Cancel order?", "This cannot be undone.", [
+    { text: "No", style: "cancel" },
+    {
+      text: "Yes, cancel",
+      style: "destructive",
+      onPress: async () => {
+        try {
+          setBusyCancel(true);
+
+          if (canCancelUPI) {
+            // Uses your backend to mark: status=cancelled, paymentStatus=failed
+            const base = process.env.EXPO_PUBLIC_PAYMENTS_URL || "https://payment-services-d0x2.onrender.com";
+            const res = await fetch(`${base}/api/payments/cancel/${doc.$id}`, { method: "POST" });
+            if (!res.ok) throw new Error("Cancel request failed");
+          } else if (canCancelCOD) {
+            // For COD (not paid yet), just remove the doc
             await databases.deleteDocument(DB_ID, ORDERS_COLLECTION_ID, doc.$id);
-            Alert.alert("Cancelled", "Your order has been cancelled.");
-            router.replace("/order");
-          } catch (e: any) {
-            Alert.alert("Failed", e?.message || "Could not cancel the order.");
-          } finally {
-            setBusyCancel(false);
           }
-        },
+
+          Alert.alert("Cancelled", "Your order has been cancelled.");
+          router.replace("/order");
+        } catch (e: any) {
+          Alert.alert("Failed", e?.message || "Could not cancel the order.");
+        } finally {
+          setBusyCancel(false);
+        }
       },
-    ]);
-  }, [doc]);
+    },
+  ]);
+}, [doc, canCancelUPI, canCancelCOD]);
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: "#fff", paddingTop: Math.max(insets.top * 0.3, 0) }}>
@@ -189,22 +203,23 @@ export default function OrderDetails() {
           />
 
           {/* Sticky cancel button (only when cancellable) */}
-          {canCancel && (
-            <View style={styles.sticky}>
-              <TouchableOpacity
-                onPress={onCancel}
-                activeOpacity={0.9}
-                style={[styles.cancelBtn, busyCancel && { opacity: 0.7 }]}
-                disabled={busyCancel}
-              >
-                <Ionicons name="close-circle-outline" size={18} color="#fff" />
-                <Text style={styles.cancelText}>{busyCancel ? "Cancelling…" : "Cancel Order"}</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-        </>
+          {/* Sticky cancel button (UPI pending or COD placed) */}
+{canCancel ? (
+  <View style={styles.sticky}>
+    <TouchableOpacity
+      onPress={cancelOrder}
+      activeOpacity={0.9}
+      style={[styles.cancelBtn, busyCancel && { opacity: 0.7 }]}
+      disabled={busyCancel}
+    >
+      <Ionicons name="close-circle-outline" size={18} color="#fff" />
+      <Text style={styles.cancelText}>{busyCancel ? "Cancelling…" : "Cancel Order"}</Text>
+    </TouchableOpacity>
+  </View>
+) : null}
+ </>
       )}
-    </SafeAreaView>
+ </SafeAreaView>
   );
 }
 

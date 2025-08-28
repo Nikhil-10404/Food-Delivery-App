@@ -1,5 +1,5 @@
 // app/orders/index.tsx
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import {
   View,
   Text,
@@ -20,15 +20,20 @@ const ORDERS_COLLECTION_ID =
   (appwriteConfig as any).ordersCollectionId ||
   (appwriteConfig as any).Orders_Collection_ID;
 
+/* ---------- Theme ---------- */
 const PRIMARY = "#111827";
 const MUTED = "#6B7280";
 const BORDER = "#E5E7EB";
 const CARD_BG = "#F9FAFB";
-const ACCENT = "#FE8C00";
 
+/* ---------- Paging ---------- */
 const PAGE = 12;
 
-/* ---------- Raw doc from Appwrite (items/address are strings) ---------- */
+/* ---------- Tabs ---------- */
+const TABS = ["Pending", "Paid", "Failed"] as const;
+type Tab = typeof TABS[number];
+
+/* ---------- Raw doc ---------- */
 type RawOrderDoc = Models.Document & {
   userId: string;
   restaurantId: string;
@@ -49,11 +54,11 @@ type RawOrderDoc = Models.Document & {
     | "preparing"
     | "on_the_way"
     | "delivered"
-    | "cancelled";
+    | "cancelled"; // (your enum)
   $createdAt: string;
 };
 
-/* ---------- Parsed shape we will actually render ---------- */
+/* ---------- Parsed ---------- */
 type ParsedOrder = Omit<RawOrderDoc, "items" | "address"> & {
   items: { id: string | number; name: string; price: number; qty: number }[];
   address: {
@@ -69,7 +74,7 @@ type ParsedOrder = Omit<RawOrderDoc, "items" | "address"> & {
   } | null;
 };
 
-/* ---------- Safe JSON parse helper ---------- */
+/* ---------- Helpers ---------- */
 function safeParse<T>(s: any, fallback: T): T {
   try {
     return typeof s === "string" ? JSON.parse(s) : fallback;
@@ -83,6 +88,8 @@ export default function OrdersListScreen() {
   const router = useRouter();
 
   const [userId, setUserId] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("Pending");
+
   const [orders, setOrders] = useState<ParsedOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -97,6 +104,11 @@ export default function OrdersListScreen() {
     })();
   }, []);
 
+  const sinceISO = useMemo(
+    () => new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    []
+  );
+
   const fetchPage = useCallback(
     async (reset = false) => {
       if (!userId || loadLock.current) return;
@@ -108,13 +120,30 @@ export default function OrdersListScreen() {
           Query.limit(PAGE),
           Query.orderDesc("$createdAt"),
         ];
+        // cursor paging
         if (!reset && cursor) q.push(Query.cursorAfter(cursor));
+
+        // tab filters
+        if (tab === "Pending") {
+          q.push(Query.equal("paymentStatus", "pending"));
+        } else if (tab === "Paid") {
+          q.push(
+            Query.equal("paymentStatus", "paid"),
+            Query.greaterThanEqual("$createdAt", sinceISO)
+          );
+        } else {
+          q.push(
+            Query.equal("paymentStatus", "failed"),
+            Query.greaterThanEqual("$createdAt", sinceISO)
+          );
+        }
 
         const res = await databases.listDocuments<RawOrderDoc>(
           DB_ID,
           ORDERS_COLLECTION_ID,
           q
         );
+
         const docs = (res.documents ?? []).map<ParsedOrder>((d) => ({
           ...d,
           items: safeParse<
@@ -133,15 +162,15 @@ export default function OrdersListScreen() {
         loadLock.current = false;
       }
     },
-    [userId, cursor]
+    [userId, cursor, tab, sinceISO]
   );
 
-  // initial + when userId becomes available
+  // initial load + when userId available + when tab changes
   useEffect(() => {
     if (!userId) return;
     setCursor(null);
     fetchPage(true);
-  }, [userId]);
+  }, [userId, tab]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -161,6 +190,8 @@ export default function OrdersListScreen() {
     const itemsCount =
       item.items?.reduce((s, it) => s + Number(it.qty || 0), 0) || 0;
 
+    const showPendingBadge = item.paymentStatus === "pending";
+
     return (
       <TouchableOpacity
         style={styles.card}
@@ -173,6 +204,7 @@ export default function OrdersListScreen() {
           <View style={styles.iconCircle}>
             <Ionicons name="restaurant-outline" size={18} color={PRIMARY} />
           </View>
+
           <View style={{ flex: 1 }}>
             <Text style={styles.title} numberOfLines={1}>
               {item.restaurantName || "Order"}
@@ -181,7 +213,15 @@ export default function OrdersListScreen() {
               {date} • {itemsCount} {itemsCount === 1 ? "item" : "items"}
             </Text>
           </View>
-          <StatusPill status={item.status} />
+
+          {/* Status pill, but if payment pending, show a stronger badge */}
+          {showPendingBadge ? (
+            <View style={styles.pendingBadge}>
+              <Text style={styles.pendingBadgeText}>Payment Pending</Text>
+            </View>
+          ) : (
+            <StatusPill status={item.status} />
+          )}
         </View>
 
         <View style={styles.row}>
@@ -192,7 +232,9 @@ export default function OrdersListScreen() {
         </View>
         <View style={styles.row}>
           <Text style={styles.muted}>Total</Text>
-          <Text style={styles.total}>₹ {Number(item.total || 0).toFixed(0)}</Text>
+          <Text style={styles.total}>
+            ₹ {Number(item.total || 0).toFixed(0)}
+          </Text>
         </View>
       </TouchableOpacity>
     );
@@ -215,6 +257,33 @@ export default function OrdersListScreen() {
         <View style={styles.iconBtn} />
       </View>
 
+      {/* Tabs */}
+      <View style={styles.tabs}>
+        {TABS.map((t) => (
+          <TouchableOpacity
+            key={t}
+            onPress={() => setTab(t)}
+            style={[
+              styles.tabChip,
+              tab === t ? styles.tabChipActive : undefined,
+            ]}
+          >
+            <Text
+              style={[
+                styles.tabChipText,
+                tab === t ? styles.tabChipTextActive : undefined,
+              ]}
+            >
+              {t}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {tab !== "Pending" ? (
+        <Text style={styles.hint}>Showing last 30 days</Text>
+      ) : null}
+
       {loading ? (
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
           <ActivityIndicator />
@@ -222,9 +291,11 @@ export default function OrdersListScreen() {
       ) : orders.length === 0 ? (
         <View style={styles.empty}>
           <Ionicons name="bag-outline" size={42} color={MUTED} />
-          <Text style={{ marginTop: 8, fontWeight: "900" }}>No orders yet</Text>
+          <Text style={{ marginTop: 8, fontWeight: "900" }}>No orders</Text>
           <Text style={{ color: MUTED, marginTop: 6 }}>
-            Place your first order to see it here
+            {tab === "Pending"
+              ? "No pending payments right now."
+              : "No orders in this period."}
           </Text>
           <TouchableOpacity
             style={styles.cta}
@@ -299,6 +370,36 @@ const styles = StyleSheet.create({
   },
   heading: { flex: 1, textAlign: "center", fontSize: 18, fontWeight: "800" },
 
+  tabs: {
+    flexDirection: "row",
+    paddingHorizontal: 12,
+    paddingTop: 2,
+    paddingBottom: 6,
+  },
+  tabChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "#F3F4F6",
+    marginRight: 8,
+  },
+  tabChipActive: {
+    backgroundColor: PRIMARY,
+  },
+  tabChipText: {
+    fontWeight: "800",
+    color: PRIMARY,
+  },
+  tabChipTextActive: {
+    color: "#fff",
+  },
+  hint: {
+    paddingHorizontal: 16,
+    paddingBottom: 6,
+    color: MUTED,
+    fontWeight: "700",
+  },
+
   card: {
     backgroundColor: "#fff",
     borderRadius: 14,
@@ -343,4 +444,17 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   ctaText: { color: "#fff", fontWeight: "900" },
+
+  // payment pending badge
+  pendingBadge: {
+    backgroundColor: "#F59E0B",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  pendingBadgeText: {
+    color: "#111827",
+    fontWeight: "900",
+    fontSize: 12,
+  },
 });

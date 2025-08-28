@@ -18,13 +18,13 @@ import { Query, Models } from "react-native-appwrite";
 
 import { useCart, CartLine } from "@/store/cart";
 import { databases, appwriteConfig, getCurrentUser } from "@/lib/appwrite";
-import CountdownSheet from "@/components/checkout/CountdownSheet";
 import AddressCard, { Address } from "@/components/checkout/AddressCard";
 import AddressForm, { AddressInput } from "@/components/checkout/AddressForm";
-import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
 import PlaceOrderSheet from "@/components/checkout/PlaceOrderSheet";
-
-
+import * as WebBrowser from "expo-web-browser";
+import { createPaymentLink } from "@/lib/payments";
+import PaymentWait from "@/components/checkout/PaymentWait"; // kept, but we won't show after close
+import { calculateTotals } from "@/lib/totals";
 
 /* ---------- Theme ---------- */
 const PRIMARY = "#111827";
@@ -57,7 +57,14 @@ type OrderDoc = Models.Document & {
   address: string; // JSON string
   paymentMethod: "COD" | "UPI" | "CARD";
   paymentStatus: "pending" | "paid";
-  status: "placed" | "accepted" | "preparing" | "on_the_way" | "delivered" | "cancelled";
+  status:
+    | "placed"
+    | "accepted"
+    | "preparing"
+    | "on_the_way"
+    | "delivered"
+    | "cancelled"
+    | "pending_payment";
 };
 
 type AddressDoc = Models.Document & {
@@ -76,19 +83,57 @@ type AddressDoc = Models.Document & {
 export default function CheckoutScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { restaurantId } = useLocalSearchParams<{ restaurantId?: string }>();
-  const rid = String(restaurantId || "");
+
+  // ✅ single source of truth for params
+  const params = useLocalSearchParams<{
+    restaurantId?: string;
+    subTotal?: string;
+    platformFee?: string;
+    deliveryFee?: string;
+    gst?: string;
+    total?: string;
+    promoCode?: string;
+  }>();
+
+  const rid = String(params.restaurantId || "");
+
+  // parse cart snapshot (when navigating from Cart)
+  const snapshot = useMemo(() => {
+    const hasAll =
+      params.subTotal != null &&
+      params.platformFee != null &&
+      params.deliveryFee != null &&
+      params.gst != null &&
+      params.total != null;
+
+    if (!hasAll) return null;
+    return {
+      subTotal: Number(params.subTotal),
+      platformFee: Number(params.platformFee),
+      deliveryFee: Number(params.deliveryFee),
+      gst: Number(params.gst),
+      total: Number(params.total),
+      promoCode: params.promoCode || "",
+    };
+  }, [params]);
+
+  /* ---------- App state ---------- */
+  const [waitingRef, setWaitingRef] = useState<string | null>(null);
+  const [showWait, setShowWait] = useState(false); // we’ll keep the component, but not show it after Razorpay tab closes
+  const [pendingUPIRef, setPendingUPIRef] = useState<string | null>(null); // Appwrite order $id while waiting for payment
 
   const { lines, clearRestaurant } = useCart();
-  const restLines: CartLine[] = useMemo(() => lines.filter((l) => l.restaurantId === rid), [lines, rid]);
+  const restLines: CartLine[] = useMemo(
+    () => lines.filter((l) => l.restaurantId === rid),
+    [lines, rid]
+  );
   const restaurantName = restLines[0]?.restaurantName || "Restaurant";
 
-  /* ---------- Price summary ---------- */
-  const subTotal = useMemo(() => restLines.reduce((s, l) => s + Number(l.item.price) * l.qty, 0), [restLines]);
-  const platformFee = 5;
-  const deliveryFee = subTotal >= 399 ? 0 : 29;
-  const gst = Math.round((subTotal + platformFee + deliveryFee) * 0.05);
-  const total = Math.max(0, subTotal + platformFee + deliveryFee + gst);
+  /* ---------- Amounts: prefer cart snapshot ---------- */
+  const { subTotal, platformFee, deliveryFee, gst, total } = useMemo(() => {
+    if (snapshot) return snapshot;
+    return calculateTotals(restLines);
+  }, [snapshot, restLines]);
 
   /* ---------- Payment ---------- */
   const [method, setMethod] = useState<"COD" | "UPI" | "CARD" | null>("COD");
@@ -98,64 +143,34 @@ export default function CheckoutScreen() {
   const [addresses, setAddresses] = useState<Address[]>([]);
   const [selectedAddrId, setSelectedAddrId] = useState<string | null>(null);
   const [savingAddr, setSavingAddr] = useState(false);
-
-  // Edit flow
   const [editingAddr, setEditingAddr] = useState<Address | null>(null);
   const [updatingAddr, setUpdatingAddr] = useState(false);
 
   /* ---------- Order flow ---------- */
   const [showCountdown, setShowCountdown] = useState(false);
   const [placing, setPlacing] = useState(false);
-  const [lastOrderId, setLastOrderId] = useState<string | null>(null);
+  const [lastOrderId, setLastOrderId] = useState<string | null>(null); // COD only
 
-  // inside CheckoutScreen component
+  const API_BASE =
+    process.env.EXPO_PUBLIC_PAYMENTS_URL ||
+    "https://payment-services-d0x2.onrender.com";
 
-const deleteAddress = useCallback(async (addrId: string) => {
-  if (!ADDR_COLLECTION_ID) return;
+  // Cancel a pending UPI order in backend (does NOT clear cart)
+  const cancelPendingUPI = useCallback(async () => {
+    if (!pendingUPIRef) return;
+    try {
+      await fetch(`${API_BASE}/api/payments/cancel/${pendingUPIRef}`, {
+        method: "POST",
+      });
+      setPendingUPIRef(null);
+      setShowWait(false);
+      Alert.alert("Cancelled", "Your UPI payment attempt was cancelled.");
+    } catch (e) {
+      Alert.alert("Failed", "Could not cancel order.");
+    }
+  }, [pendingUPIRef]);
 
-  // Optional: confirm
-  Alert.alert("Delete address", "Are you sure you want to delete this address?", [
-    { text: "Cancel", style: "cancel" },
-    {
-      text: "Delete",
-      style: "destructive",
-      onPress: async () => {
-        try {
-          // find the address so we know if it was default
-          const toDelete = addresses.find(a => a.$id === addrId);
-
-          await databases.deleteDocument(DB_ID, ADDR_COLLECTION_ID, addrId);
-
-          // remove locally
-          setAddresses(prev => prev.filter(a => a.$id !== addrId));
-
-          // fix selection
-          setSelectedAddrId(prevSel => {
-            if (prevSel !== addrId) return prevSel; // selection unchanged
-            const remaining = addresses.filter(a => a.$id !== addrId);
-            const next = remaining.find(a => a.isDefault) || remaining[0] || null;
-            return next ? next.$id : null;
-          });
-
-          // if we deleted the default, make the first remaining address default in DB (optional but nice)
-          if (toDelete?.isDefault) {
-            const remaining = addresses.filter(a => a.$id !== addrId);
-            const pick = remaining[0];
-            if (pick) {
-              await databases.updateDocument(DB_ID, ADDR_COLLECTION_ID, pick.$id, { isDefault: true });
-              setAddresses(prev => prev.map(a => ({ ...a, isDefault: a.$id === pick.$id })));
-            }
-          }
-        } catch (e: any) {
-          Alert.alert("Failed", e?.message || "Could not delete address.");
-        }
-      },
-    },
-  ]);
-}, [addresses]);
-
-
-  /* ---------- Load user + addresses ---------- */
+  /* ---------- Address helpers ---------- */
   const refreshAddresses = useCallback(
     async (uid?: string) => {
       const meId = uid || userId;
@@ -166,7 +181,6 @@ const deleteAddress = useCallback(async (addrId: string) => {
       ]);
       const list = (res.documents ?? []) as any as Address[];
       setAddresses(list);
-      // keep current selection if still present, else pick default or first
       setSelectedAddrId((prev) => {
         if (prev && list.some((a) => a.$id === prev)) return prev;
         const def = list.find((a) => a.isDefault) || list[0];
@@ -199,9 +213,12 @@ const deleteAddress = useCallback(async (addrId: string) => {
       ]);
       const docs = res.documents ?? [];
       await Promise.all(
-        docs.map((d) => databases.updateDocument(DB_ID, ADDR_COLLECTION_ID, d.$id, { isDefault: d.$id === addrId }))
+        docs.map((d) =>
+          databases.updateDocument(DB_ID, ADDR_COLLECTION_ID, d.$id, {
+            isDefault: d.$id === addrId,
+          })
+        )
       );
-      // update local
       setAddresses((prev) => prev.map((a) => ({ ...a, isDefault: a.$id === addrId })));
       setSelectedAddrId(addrId);
     },
@@ -213,29 +230,36 @@ const deleteAddress = useCallback(async (addrId: string) => {
       if (!userId || !ADDR_COLLECTION_ID) return;
       setSavingAddr(true);
       try {
-        // if set as default, unset others first
         if (data.isDefault) {
           const res = await databases.listDocuments<AddressDoc>(DB_ID, ADDR_COLLECTION_ID, [
             Query.equal("userId", userId),
             Query.limit(100),
           ]);
           await Promise.all(
-            (res.documents ?? []).map((d) => databases.updateDocument(DB_ID, ADDR_COLLECTION_ID, d.$id, { isDefault: false }))
+            (res.documents ?? []).map((d) =>
+              databases.updateDocument(DB_ID, ADDR_COLLECTION_ID, d.$id, {
+                isDefault: false,
+              })
+            )
           );
         }
-        const created = await databases.createDocument<AddressDoc>(DB_ID, ADDR_COLLECTION_ID, "unique()", {
-          userId,
-          fullName: data.fullName.trim(),
-          phone: data.phone.trim(),
-          line1: data.line1.trim(),
-          landmark: data.landmark?.trim() || "",
-          pincode: data.pincode.trim(),
-          city: data.city.trim(),
-          state: data.state.trim(),
-          country: data.country.trim(),
-          isDefault: !!data.isDefault,
-        } as any);
-        // put newly created at top & select it
+        const created = await databases.createDocument<AddressDoc>(
+          DB_ID,
+          ADDR_COLLECTION_ID,
+          "unique()",
+          {
+            userId,
+            fullName: data.fullName.trim(),
+            phone: data.phone.trim(),
+            line1: data.line1.trim(),
+            landmark: data.landmark?.trim() || "",
+            pincode: data.pincode.trim(),
+            city: data.city.trim(),
+            state: data.state.trim(),
+            country: data.country.trim(),
+            isDefault: !!data.isDefault,
+          } as any
+        );
         setAddresses((prev) => [created as any, ...prev]);
         setSelectedAddrId(created.$id);
       } catch (e: any) {
@@ -249,65 +273,61 @@ const deleteAddress = useCallback(async (addrId: string) => {
 
   const beginEdit = (a: Address) => setEditingAddr(a);
 
-  // inside app/checkout/[restaurantId].tsx
-const updateAddress = useCallback(
-  async (data: Partial<AddressInput> | AddressInput) => {
-    if (!editingAddr || !ADDR_COLLECTION_ID || !userId) return;
-    setUpdatingAddr(true);
-    try {
-      const d = data as Partial<AddressInput>;
+  const updateAddress = useCallback(
+    async (data: Partial<AddressInput> | AddressInput) => {
+      if (!editingAddr || !ADDR_COLLECTION_ID || !userId) return;
+      setUpdatingAddr(true);
+      try {
+        const d = data as Partial<AddressInput>;
 
-      // 1) If setting this as default, unset others first
-      if (d.isDefault === true) {
-        const res = await databases.listDocuments<AddressDoc>(DB_ID, ADDR_COLLECTION_ID, [
-          Query.equal("userId", userId),
-          Query.limit(100),
-        ]);
-        await Promise.all(
-          (res.documents ?? []).map((doc) =>
-            databases.updateDocument(DB_ID, ADDR_COLLECTION_ID, doc.$id, {
-              isDefault: doc.$id === editingAddr.$id,
-            })
-          )
+        if (d.isDefault === true) {
+          const res = await databases.listDocuments<AddressDoc>(DB_ID, ADDR_COLLECTION_ID, [
+            Query.equal("userId", userId),
+            Query.limit(100),
+          ]);
+          await Promise.all(
+            (res.documents ?? []).map((doc) =>
+              databases.updateDocument(DB_ID, ADDR_COLLECTION_ID, doc.$id, {
+                isDefault: doc.$id === editingAddr.$id,
+              })
+            )
+          );
+        }
+
+        const merged = {
+          fullName: (d.fullName ?? editingAddr.fullName).trim(),
+          phone: (d.phone ?? editingAddr.phone).trim(),
+          line1: (d.line1 ?? editingAddr.line1).trim(),
+          landmark: (d.landmark ?? editingAddr.landmark ?? "").trim(),
+          pincode: (d.pincode ?? editingAddr.pincode).trim(),
+          city: (d.city ?? editingAddr.city).trim(),
+          state: (d.state ?? editingAddr.state).trim(),
+          country: (d.country ?? editingAddr.country).trim(),
+          isDefault: d.isDefault !== undefined ? !!d.isDefault : !!editingAddr.isDefault,
+        };
+
+        const updated = await databases.updateDocument<AddressDoc>(
+          DB_ID,
+          ADDR_COLLECTION_ID,
+          editingAddr.$id,
+          merged as any
         );
+
+        setAddresses((prev) =>
+          prev.map((a) => (a.$id === editingAddr.$id ? (updated as any) : a))
+        );
+        if (merged.isDefault) setSelectedAddrId(editingAddr.$id);
+
+        setEditingAddr(null);
+        Alert.alert("Saved", "Address updated.");
+      } catch (e: any) {
+        Alert.alert("Failed", e?.message || "Could not update address.");
+      } finally {
+        setUpdatingAddr(false);
       }
-
-      // 2) MERGE: fall back to existing values when a field isn't provided
-      const merged = {
-        fullName: (d.fullName ?? editingAddr.fullName).trim(),
-        phone: (d.phone ?? editingAddr.phone).trim(),
-        line1: (d.line1 ?? editingAddr.line1).trim(),
-        landmark: (d.landmark ?? editingAddr.landmark ?? "").trim(),
-        pincode: (d.pincode ?? editingAddr.pincode).trim(),
-        city: (d.city ?? editingAddr.city).trim(),
-        state: (d.state ?? editingAddr.state).trim(),
-        country: (d.country ?? editingAddr.country).trim(),
-        // if isDefault not supplied, keep previous value
-        isDefault: d.isDefault !== undefined ? !!d.isDefault : !!editingAddr.isDefault,
-      };
-
-      // 3) Send the merged object (full doc shape) so nothing gets wiped
-      const updated = await databases.updateDocument<AddressDoc>(
-        DB_ID,
-        ADDR_COLLECTION_ID,
-        editingAddr.$id,
-        merged as any
-      );
-
-      // 4) Update local state
-      setAddresses((prev) => prev.map((a) => (a.$id === editingAddr.$id ? (updated as any) : a)));
-      if (merged.isDefault) setSelectedAddrId(editingAddr.$id);
-
-      setEditingAddr(null);
-      Alert.alert("Saved", "Address updated.");
-    } catch (e: any) {
-      Alert.alert("Failed", e?.message || "Could not update address.");
-    } finally {
-      setUpdatingAddr(false);
-    }
-  },
-  [editingAddr, userId]
-);
+    },
+    [editingAddr, userId]
+  );
 
   /* ---------- Validation ---------- */
   const isValid = !!selectedAddrId && method !== null && restLines.length > 0;
@@ -359,30 +379,119 @@ const updateAddress = useCallback(
         }),
         paymentMethod: method!,
         paymentStatus: "pending",
-        status: "placed",
+        status: method === "UPI" ? ("pending_payment" as any) : "placed",
       };
 
-      const created = await databases.createDocument<OrderDoc>(DB_ID, ORDERS_COLLECTION_ID, "unique()", payload as any);
+      if (method === "UPI") {
+        // Reuse an existing pending order for this user+restaurant if present
+        let referenceId = pendingUPIRef;
+
+        if (!referenceId) {
+          try {
+            const res = await databases.listDocuments<OrderDoc>(
+              DB_ID,
+              ORDERS_COLLECTION_ID,
+              [
+                Query.equal("userId", userId),
+                Query.equal("restaurantId", rid),
+                Query.equal("paymentMethod", "UPI"),
+                Query.equal("status", "pending_payment"),
+                Query.orderDesc("$createdAt"),
+                Query.limit(1),
+              ]
+            );
+            const existing = res.documents?.[0];
+            if (existing?.$id) {
+              referenceId = existing.$id;
+              setPendingUPIRef(existing.$id);
+            }
+          } catch {}
+        }
+
+        if (!referenceId) {
+          const created = await databases.createDocument<OrderDoc>(
+            DB_ID,
+            ORDERS_COLLECTION_ID,
+            "unique()",
+            payload as any
+          );
+          await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, created.$id, {
+            referenceId: created.$id,
+          });
+          referenceId = created.$id;
+          setPendingUPIRef(created.$id);
+        } else {
+          // sync latest totals/items on retry
+          await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, referenceId, {
+            total,
+            items: JSON.stringify(itemsArr),
+          });
+        }
+
+        // Create/open payment link
+        try {
+          const link = await createPaymentLink({
+            referenceId,
+            amount: total,
+            name: selectedAddress.fullName,
+          });
+
+          if (link?.short_url) {
+            // resolves when user closes Razorpay tab
+            await WebBrowser.openBrowserAsync(link.short_url);
+          }
+
+          // User closed or navigated back → show Pay button again; no waiting overlay.
+          setWaitingRef(null);
+          setShowWait(false);
+        } catch (err: any) {
+          Alert.alert(
+            "UPI payment error",
+            err?.message || "Could not start payment. Please try again."
+          );
+        }
+
+        setPlacing(false);
+        return;
+      }
+
+      // ---------- COD FLOW ----------
+      const created = await databases.createDocument<OrderDoc>(
+        DB_ID,
+        ORDERS_COLLECTION_ID,
+        "unique()",
+        payload as any
+      );
+      await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, created.$id, {
+        referenceId: created.$id,
+      });
+
       setLastOrderId(created.$id);
       clearRestaurant(rid);
-      Alert.alert(
-  "Order placed 🎉",
-  "Your order has been placed successfully!",
-  [
-    {
-      text: "View Order",
-      onPress: () => router.replace("/order"),
-    },
-    { text: "OK", style: "cancel" },
-  ]
-);
-
+      Alert.alert("Order placed 🎉", "Your order has been placed successfully!", [
+        { text: "View Order", onPress: () => router.replace("/order") },
+        { text: "OK", style: "cancel" },
+      ]);
     } catch (e: any) {
       Alert.alert("Failed", e?.message || "Could not place the order.");
     } finally {
       setPlacing(false);
     }
-  }, [ORDERS_COLLECTION_ID, selectedAddress, userId, rid, restaurantName, restLines, subTotal, platformFee, deliveryFee, gst, total, method]);
+  }, [
+    ORDERS_COLLECTION_ID,
+    selectedAddress,
+    userId,
+    rid,
+    restaurantName,
+    restLines,
+    subTotal,
+    platformFee,
+    deliveryFee,
+    gst,
+    total,
+    method,
+    pendingUPIRef,
+  ]);
 
   const cancelOrder = useCallback(async () => {
     if (!ORDERS_COLLECTION_ID || !lastOrderId) return;
@@ -399,7 +508,9 @@ const updateAddress = useCallback(
 
   /* ---------- UI ---------- */
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: "#fff", paddingTop: Math.max(insets.top * 0.3, 0) }}>
+    <SafeAreaView
+      style={{ flex: 1, backgroundColor: "#fff", paddingTop: Math.max(insets.top * 0.3, 0) }}
+    >
       {/* Soft gradient header */}
       <LinearGradient
         colors={["#FFF7ED", "#FFFFFF"]}
@@ -418,7 +529,9 @@ const updateAddress = useCallback(
         <View style={styles.summaryStrip}>
           <View>
             <Text style={{ fontWeight: "900", fontSize: 16 }}>{restaurantName}</Text>
-            <Text style={{ color: MUTED, fontWeight: "700" }}>Items: {restLines.length}</Text>
+            <Text style={{ color: MUTED, fontWeight: "700" }}>
+              Items: {restLines.length}
+            </Text>
           </View>
           <View style={styles.totalPill}>
             <Text style={{ color: "#fff", fontWeight: "900" }}>₹ {total.toFixed(0)}</Text>
@@ -443,23 +556,49 @@ const updateAddress = useCallback(
               No addresses yet — add one below.
             </Text>
           ) : (
-           addresses.map(a => (
-  <AddressCard
-  key={a.$id}
-  a={a}
-  selected={selectedAddrId === a.$id}
-  onPress={() => setSelectedAddrId(a.$id)}
-  onMakeDefault={() => makeDefault(a.$id)}
-  onEdit={() => beginEdit(a)}             // <-- keep this
-  onDelete={() => deleteAddress(a.$id)}    // <-- and this
-/>
-
+            addresses.map((a) => (
+              <AddressCard
+                key={a.$id}
+                a={a}
+                selected={selectedAddrId === a.$id}
+                onPress={() => setSelectedAddrId(a.$id)}
+                onMakeDefault={() => makeDefault(a.$id)}
+                onEdit={() => beginEdit(a)}
+                onDelete={() => {
+                  Alert.alert("Delete address", "Are you sure you want to delete this address?", [
+                    { text: "Cancel", style: "cancel" },
+                    {
+                      text: "Delete",
+                      style: "destructive",
+                      onPress: async () => {
+                        try {
+                          await databases.deleteDocument(DB_ID, ADDR_COLLECTION_ID, a.$id);
+                          setAddresses((prev) => prev.filter((x) => x.$id !== a.$id));
+                          setSelectedAddrId((prevSel) =>
+                            prevSel === a.$id ? (addresses[0]?.$id ?? null) : prevSel
+                          );
+                        } catch (e: any) {
+                          Alert.alert("Failed", e?.message || "Could not delete address.");
+                        }
+                      },
+                    },
+                  ]);
+                }}
+              />
             ))
           )}
 
           {/* Add / Edit address */}
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-            <Text style={styles.sectionLabel}>{editingAddr ? "Edit Address" : "Add New Address"}</Text>
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <Text style={styles.sectionLabel}>
+              {editingAddr ? "Edit Address" : "Add New Address"}
+            </Text>
             {editingAddr ? (
               <TouchableOpacity onPress={() => setEditingAddr(null)} style={{ padding: 6 }}>
                 <Text style={{ color: "#2563EB", fontWeight: "800" }}>Cancel</Text>
@@ -468,27 +607,27 @@ const updateAddress = useCallback(
           </View>
 
           {editingAddr ? (
-           <AddressForm
-  mode="edit"
-  initial={{
-    fullName: editingAddr.fullName,
-    phone: editingAddr.phone,
-    line1: editingAddr.line1,
-    landmark: editingAddr.landmark,
-    pincode: editingAddr.pincode,
-    city: editingAddr.city,
-    state: editingAddr.state,
-    country: editingAddr.country,
-    isDefault: editingAddr.isDefault,
-  }}
-  onSubmit={updateAddress}        // <- accepts Partial | Full
-  submitting={updatingAddr}
-  submitLabel="Update Address"
-/>
+            <AddressForm
+              mode="edit"
+              initial={{
+                fullName: editingAddr.fullName,
+                phone: editingAddr.phone,
+                line1: editingAddr.line1,
+                landmark: editingAddr.landmark,
+                pincode: editingAddr.pincode,
+                city: editingAddr.city,
+                state: editingAddr.state,
+                country: editingAddr.country,
+                isDefault: editingAddr.isDefault,
+              }}
+              onSubmit={updateAddress}
+              submitting={updatingAddr}
+              submitLabel="Update Address"
+            />
           ) : (
-           <AddressForm
+            <AddressForm
   mode="create"
-  onSubmit={(d) => addNewAddress(d as AddressInput)}   // cast here
+  onSubmit={(a) => addNewAddress(a as AddressInput)}
   submitting={savingAddr}
 />
           )}
@@ -496,54 +635,140 @@ const updateAddress = useCallback(
           {/* Payment method */}
           <Text style={styles.sectionLabel}>Payment Method</Text>
           <View style={[styles.card, { backgroundColor: "#FFFBEB", borderColor: "#FDE68A" }]}>
-            <PayOption icon="cash-outline" label="Cash on Delivery" active={method === "COD"} onPress={() => setMethod("COD")} />
-            <PayOption icon="qr-code-outline" label="UPI (coming soon)" active={method === "UPI"} onPress={() => setMethod("UPI")} disabled badge="Soon" />
-            <PayOption icon="card-outline" label="Credit / Debit Card (coming soon)" active={method === "CARD"} onPress={() => setMethod("CARD")} disabled badge="Soon" />
-            <Text style={{ color: MUTED, fontSize: 12, marginTop: 8 }}>
-              (Online payments coming next. Select COD to place order.)
-            </Text>
+            <PayOption
+              icon="cash-outline"
+              label="Cash on Delivery"
+              active={method === "COD"}
+              onPress={() => setMethod("COD")}
+            />
+            <PayOption
+              icon="qr-code-outline"
+              label="UPI (Razorpay)"
+              active={method === "UPI"}
+              onPress={() => setMethod("UPI")}
+            />
+            <PayOption
+              icon="card-outline"
+              label="Credit / Debit Card (coming soon)"
+              active={method === "CARD"}
+              onPress={() => setMethod("CARD")}
+              disabled
+              badge="Soon"
+            />
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
 
       {/* Sticky footer */}
       <View style={[styles.sticky, { paddingBottom: Math.max(insets.bottom + 8, 16) }]}>
-        {!lastOrderId ? (
+        {showWait ? (
+          // UPI is pending → show Cancel (doesn't clear cart)
+          <TouchableOpacity
+            onPress={cancelPendingUPI}
+            activeOpacity={0.9}
+            style={[styles.placeBtn, { backgroundColor: "#DC2626" }]}
+          >
+            <Ionicons name="close-circle-outline" size={16} color="#fff" />
+            <Text style={styles.placeText}>Cancel UPI Payment</Text>
+          </TouchableOpacity>
+        ) : lastOrderId ? (
+          // COD placed → Cancel deletes order doc
+          <TouchableOpacity
+            onPress={cancelOrder}
+            activeOpacity={0.9}
+            style={[styles.placeBtn, { backgroundColor: RED }]}
+          >
+            <Ionicons name="close-circle-outline" size={16} color="#fff" />
+            <Text style={styles.placeText}>Cancel Order</Text>
+          </TouchableOpacity>
+        ) : (
+          // default: Place/Pay button
           <TouchableOpacity
             disabled={!isValid || placing}
             onPress={startPlaceOrder}
             activeOpacity={0.9}
-            style={[styles.placeBtn, { backgroundColor: isValid && !placing ? GREEN : "#9CA3AF" }]}
+            style={[
+              styles.placeBtn,
+              { backgroundColor: isValid && !placing ? GREEN : "#9CA3AF" },
+            ]}
           >
             <View style={[styles.badge, { backgroundColor: "#14532D" }]}>
               <Ionicons name="shield-checkmark-outline" size={14} color="#fff" />
               <Text style={styles.badgeText}>Secure</Text>
             </View>
-            <Text style={styles.placeText}>{placing ? "Placing…" : "Place Order"}</Text>
-          </TouchableOpacity>
-        ) : (
-          <TouchableOpacity onPress={cancelOrder} activeOpacity={0.9} style={[styles.placeBtn, { backgroundColor: RED }]}>
-            <Ionicons name="close-circle-outline" size={16} color="#fff" />
-            <Text style={styles.placeText}>Cancel Order</Text>
+            <Text style={styles.placeText}>
+              {method === "UPI"
+                ? placing
+                  ? "Creating Link…"
+                  : "Pay with UPI"
+                : placing
+                ? "Placing…"
+                : "Place Order"}
+            </Text>
           </TouchableOpacity>
         )}
       </View>
 
       <PlaceOrderSheet
-  visible={showCountdown}
-  amount={total}
-  methodLabel={`Pay ₹${total.toFixed(0)} on delivery (UPI/cash)`}
-  addressTitle={`Delivering to ${selectedAddress?.landmark ? "Home" : selectedAddress?.city || "address"}`}
-  addressLine={[
-    selectedAddress?.line1,
-    selectedAddress?.city,
-    selectedAddress?.state,
-    selectedAddress?.country,
-  ].filter(Boolean).join(", ")}
-  onCancel={cancelCountdown}
-  onDone={doPlaceOrder}
-  durationMs={5000}
-/>
+        visible={showCountdown}
+        amount={total}
+        methodLabel={
+          method === "UPI"
+            ? `Pay ₹${total.toFixed(0)} via UPI (Razorpay)`
+            : `Pay ₹${total.toFixed(0)} on delivery (UPI/cash)`
+        }
+        addressTitle={`Delivering to ${
+          selectedAddress?.landmark ? "Home" : selectedAddress?.city || "address"
+        }`}
+        addressLine={[
+          selectedAddress?.line1,
+          selectedAddress?.city,
+          selectedAddress?.state,
+          selectedAddress?.country,
+        ]
+          .filter(Boolean)
+          .join(", ")}
+        onCancel={cancelCountdown}
+        onDone={doPlaceOrder}
+        durationMs={5000}
+      />
+
+      {/* We keep PaymentWait for cases where you explicitly want polling,
+          but we no longer show it after user closes Razorpay tab */}
+      {showWait && waitingRef ? (
+        <View
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "#fff",
+            borderTopWidth: StyleSheet.hairlineWidth,
+            borderTopColor: "#E5E7EB",
+            padding: 16,
+          }}
+        >
+          <PaymentWait
+            referenceId={waitingRef}
+            onPaid={() => {
+              setShowWait(false);
+              setPendingUPIRef(null);
+              clearRestaurant(rid); // clear only here on successful UPI
+              Alert.alert("Payment received 🎉", "Your order is confirmed.", [
+                { text: "View Order", onPress: () => router.replace("/order") },
+              ]);
+            }}
+            onFailed={(st) => {
+              setShowWait(false);
+              Alert.alert("Payment " + st, "Please try again or pick COD.");
+            }}
+            onPending={() => {
+              // user closed or timeout — just hide overlay; "Pay with UPI" button shows again
+              setShowWait(false);
+            }}
+          />
+        </View>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -568,14 +793,22 @@ function PayOption({
     <TouchableOpacity
       onPress={!disabled ? onPress : undefined}
       activeOpacity={0.9}
-      style={[styles.payRow, active ? { borderColor: GREEN, backgroundColor: TINT2 } : null, disabled ? { opacity: 0.6 } : null]}
+      style={[
+        styles.payRow,
+        active ? { borderColor: GREEN, backgroundColor: TINT2 } : null,
+        disabled ? { opacity: 0.6 } : null,
+      ]}
     >
       <View style={[styles.iconCircle, active ? { backgroundColor: PRIMARY } : null]}>
         <Ionicons name={icon} size={18} color={active ? "#fff" : PRIMARY} />
       </View>
       <Text style={{ flex: 1, fontWeight: "800", color: PRIMARY }}>{label}</Text>
       {badge ? <Text style={styles.soon}>{badge}</Text> : null}
-      <Ionicons name={active ? "radio-button-on" : "radio-button-off"} size={20} color={PRIMARY} />
+      <Ionicons
+        name={active ? "radio-button-on" : "radio-button-off"}
+        size={20}
+        color={PRIMARY}
+      />
     </TouchableOpacity>
   );
 }
@@ -583,17 +816,46 @@ function PayOption({
 /* ---------- Styles ---------- */
 const styles = StyleSheet.create({
   topBar: { height: 50, flexDirection: "row", alignItems: "center" },
-  iconBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
+  iconBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   heading: { flex: 1, textAlign: "center", fontSize: 18, fontWeight: "800" },
 
-  summaryStrip: { marginTop: 10, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  totalPill: { backgroundColor: ACCENT, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999 },
+  summaryStrip: {
+    marginTop: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  totalPill: {
+    backgroundColor: ACCENT,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+  },
 
-  sectionLabel: { marginTop: 14, marginBottom: 8, marginLeft: 6, color: PRIMARY, fontWeight: "900", fontSize: 14 },
+  sectionLabel: {
+    marginTop: 14,
+    marginBottom: 8,
+    marginLeft: 6,
+    color: PRIMARY,
+    fontWeight: "900",
+    fontSize: 14,
+  },
 
-  card: { backgroundColor: "#fff", borderRadius: 14, padding: 12, borderWidth: 1, borderColor: BORDER, marginBottom: 12 },
+  card: {
+    backgroundColor: "#fff",
+    borderRadius: 14,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: BORDER,
+    marginBottom: 12,
+  },
 
-  // no "gap" to avoid text input re-layout issues on Android
   payRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -617,7 +879,6 @@ const styles = StyleSheet.create({
   },
   soon: { color: "#9CA3AF", fontSize: 11, fontWeight: "900", marginRight: 8 },
 
-  // no "gap" here either
   sticky: {
     position: "absolute",
     left: 0,
@@ -648,5 +909,5 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     marginRight: 10,
   },
-  badgeText: { color: "#fff", fontSize: 12, fontWeight: "800", marginLeft: 6 },
+  badgeText: { color: "#fff", fontSize: 12, fontWeight: "800" },
 });

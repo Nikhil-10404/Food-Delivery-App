@@ -21,6 +21,12 @@ Sentry.init({
   integrations: [Sentry.mobileReplayIntegration(), Sentry.feedbackIntegration()],
 });
 
+const _origWarn = console.warn;
+console.warn = (...args: any[]) => {
+  if (typeof args[0] === "string" && args[0].includes("This route is deprecated")) return;
+  _origWarn(...args);
+};
+
 export default Sentry.wrap(function RootLayout() {
   const { isLoading, fetchAuthenticatedUser } = useAuthStore();
 

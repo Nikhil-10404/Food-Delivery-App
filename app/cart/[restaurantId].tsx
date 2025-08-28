@@ -326,7 +326,20 @@ const freePct = Math.min(1, subTotal / freeDeliveryThreshold);
       `Items: ${restLines.length}\nSubtotal: ₹${subTotal.toFixed(0)}\nTotal: ₹${total.toFixed(0)}\n\nPromo: ${validCoupon?.code || "-"}\nNotes: ${note || "-"}`,
       [
         { text: "Cancel", style: "cancel" },
-      { text: "Proceed", onPress: () => router.push({ pathname: "/checkout/[restaurantId]", params: { restaurantId: rid } }) },
+      { text: "Proceed", onPress: () =>router.push({
+    pathname: "/checkout/[restaurantId]",
+    params: {
+      restaurantId: rid,
+      subTotal: String(subTotal),
+      platformFee: String(platformFee),
+      deliveryFee: String(deliveryFee),
+      gst: String(gst),
+      total: String(total),
+      // optional extras (handy to display on Checkout if you want)
+      promoCode: validCoupon?.code || "",
+      promoDiscount: String(promoDiscount || 0),
+    },
+  }) },
       ]
     );
   };
