@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { View, Text, TextInput, TouchableOpacity, Platform } from "react-native";
+import { View, Text, TextInput, TouchableOpacity, Platform, Image } from "react-native";
 import LocationPicker from "@/components/location/LocationPicker";
 
 const COLORS = {
@@ -30,26 +30,67 @@ export default function HomeHeaderLight({
 }) {
   // random tiny caption under title so it feels alive
   const caption = useMemo(
-    () => ["Fresh • Fast • Tasty", "Curated for SMS", "Order in 2 taps"].sort(() => 0.5 - Math.random())[0],
+    () =>
+      ["Fresh • Fast • Tasty", "Curated for SMS", "Order in 2 taps"].sort(
+        () => 0.5 - Math.random()
+      )[0],
     []
   );
 
   return (
     <View style={{ paddingHorizontal: 20, paddingTop: 10, paddingBottom: 18 }}>
       {/* Warm hero banner behind header */}
-      <View style={{ position: "absolute", inset: 0, height: 180, backgroundColor: "#FFF7ED", borderBottomLeftRadius: 24, borderBottomRightRadius: 24 }} />
+      <View
+        style={{
+          position: "absolute",
+          inset: 0,
+          height: 180,
+          backgroundColor: "#FFF7ED",
+          borderBottomLeftRadius: 24,
+          borderBottomRightRadius: 24,
+        }}
+      />
+
       {/* Title row */}
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+      <View
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
         <View>
-          <Text style={{ color: COLORS.text, fontSize: 34, fontWeight: "800" }}>Foodie</Text>
-          <Text style={{ color: COLORS.sub, fontSize: 12, fontWeight: "600", marginTop: 2 }}>SMS MEDICAL COLLEGE • {caption}</Text>
+          <Text style={{ color: COLORS.text, fontSize: 34, fontWeight: "800" }}>
+            Foodie
+          </Text>
+          <Text
+            style={{
+              color: COLORS.sub,
+              fontSize: 12,
+              fontWeight: "600",
+              marginTop: 2,
+            }}
+          >
+            SMS MEDICAL COLLEGE • {caption}
+          </Text>
         </View>
+
+        {/* ✅ App Icon in top-right */}
+        <Image
+          source={require("../../assets/foodie-icon.png")}
+          style={{ width: 42, height: 42, borderRadius: 12 }}
+          resizeMode="contain"
+        />
       </View>
 
       {/* Greeting */}
       <View style={{ marginTop: 14 }}>
-        <Text style={{ color: COLORS.text, fontSize: 22, fontWeight: "800" }}>{greeting}</Text>
-        <Text style={{ color: COLORS.sub, fontSize: 15, marginTop: 4 }}>{mood}</Text>
+        <Text style={{ color: COLORS.text, fontSize: 22, fontWeight: "800" }}>
+          {greeting}
+        </Text>
+        <Text style={{ color: COLORS.sub, fontSize: 15, marginTop: 4 }}>
+          {mood}
+        </Text>
       </View>
 
       {/* Glassy search */}
@@ -81,13 +122,27 @@ export default function HomeHeaderLight({
         />
         <TouchableOpacity
           onPress={onSubmitSearch}
-          style={{ paddingHorizontal: 14, paddingVertical: 8, backgroundColor: COLORS.mint, borderRadius: 12 }}
+          style={{
+            paddingHorizontal: 14,
+            paddingVertical: 8,
+            backgroundColor: COLORS.mint,
+            borderRadius: 12,
+          }}
         >
           <Text style={{ color: "white", fontWeight: "700" }}>Search</Text>
         </TouchableOpacity>
       </View>
 
-      <Text style={{ color: COLORS.text, fontSize: 18, fontWeight: "700", marginTop: 18 }}>All Restaurants (A–Z)</Text>
+      <Text
+        style={{
+          color: COLORS.text,
+          fontSize: 18,
+          fontWeight: "700",
+          marginTop: 18,
+        }}
+      >
+        All Restaurants (A–Z)
+      </Text>
     </View>
   );
 }
