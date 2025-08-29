@@ -1,6 +1,5 @@
 import React, { useMemo } from "react";
 import { View, Text, TextInput, TouchableOpacity, Platform } from "react-native";
-import CartButton from "@/components/CardButton";
 import LocationPicker from "@/components/location/LocationPicker";
 
 const COLORS = {
@@ -31,7 +30,7 @@ export default function HomeHeaderLight({
 }) {
   // random tiny caption under title so it feels alive
   const caption = useMemo(
-    () => ["Fresh • Fast • Tasty", "Curated for NIT Hamirpur", "Order in 2 taps"].sort(() => 0.5 - Math.random())[0],
+    () => ["Fresh • Fast • Tasty", "Curated for SMS", "Order in 2 taps"].sort(() => 0.5 - Math.random())[0],
     []
   );
 
@@ -43,9 +42,8 @@ export default function HomeHeaderLight({
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
         <View>
           <Text style={{ color: COLORS.text, fontSize: 34, fontWeight: "800" }}>Foodie</Text>
-          <Text style={{ color: COLORS.sub, fontSize: 12, fontWeight: "600", marginTop: 2 }}>NIT HAMIRPUR • {caption}</Text>
+          <Text style={{ color: COLORS.sub, fontSize: 12, fontWeight: "600", marginTop: 2 }}>SMS MEDICAL COLLEGE • {caption}</Text>
         </View>
-        <CartButton />
       </View>
 
       {/* Greeting */}

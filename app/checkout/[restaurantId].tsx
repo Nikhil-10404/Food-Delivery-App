@@ -9,6 +9,7 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  RefreshControl,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -21,7 +22,6 @@ import { databases, appwriteConfig, getCurrentUser } from "@/lib/appwrite";
 import AddressCard, { Address } from "@/components/checkout/AddressCard";
 import AddressForm, { AddressInput } from "@/components/checkout/AddressForm";
 import PlaceOrderSheet from "@/components/checkout/PlaceOrderSheet";
-import { calculateTotals } from "@/lib/totals";
 
 import * as Linking from "expo-linking";
 import { payPendingUPI } from "@/lib/payments-client";
@@ -38,10 +38,14 @@ const RED = "#DC2626";
 const TINT = "#F1F5F9";
 const TINT2 = "#ECFDF5";
 
-/* ---------- Collections ---------- */
+/* ---------- Collections / IDs ---------- */
 const DB_ID = appwriteConfig.databaseId;
 const ORDERS_COLLECTION_ID = appwriteConfig.ordersCollectionId;
 const ADDR_COLLECTION_ID = appwriteConfig.addressesCollectionId;
+const MENU_ITEMS = appwriteConfig.menuItemsCollectionId;
+const RESTAURANTS = appwriteConfig.Restaurant_Collection_ID;
+const PLATFORM_COLLECTION_ID = (appwriteConfig as any).platformCollectionId;
+const PLATFORM_DOC_ID = (appwriteConfig as any).PLATFORM_DOC_ID as string;
 
 /* ---------- Types ---------- */
 type OrderDoc = Models.Document & {
@@ -81,37 +85,148 @@ type AddressDoc = Models.Document & {
   isDefault: boolean;
 };
 
+type MenuItemDoc = Models.Document & {
+  available?: boolean;
+  price?: number;
+};
+
+/* ---------- Utils ---------- */
+const clamp = (n: number, min = 0) => (n < min ? min : n);
+
+/* ===========================================================
+   Checkout Screen
+   =========================================================== */
 export default function CheckoutScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { restaurantId, subTotal: pSub, platformFee: pPlat, deliveryFee: pDel, gst: pGst, total: pTot } =
-    useLocalSearchParams<{
-      restaurantId?: string;
-      subTotal?: string;
-      platformFee?: string;
-      deliveryFee?: string;
-      gst?: string;
-      total?: string;
-    }>();
+
+  // Accept optional extras from Cart (we always re-check availability here).
+  const {
+    restaurantId,
+    promoCode: pCode,
+    promoDiscount: pDisc,
+  } = useLocalSearchParams<{
+    restaurantId?: string;
+    promoCode?: string;
+    promoDiscount?: string;
+  }>();
 
   const rid = String(restaurantId || "");
-  const { lines, clearRestaurant } = useCart();
-  const restLines: CartLine[] = useMemo(() => lines.filter((l) => l.restaurantId === rid), [lines, rid]);
+  const { lines, clearRestaurant, removeItem } = useCart();
+
+  const restLines: CartLine[] = useMemo(
+    () => lines.filter((l) => l.restaurantId === rid),
+    [lines, rid]
+  );
   const restaurantName = restLines[0]?.restaurantName || "Restaurant";
 
-  /* ---------- Price summary ---------- */
-  const { subTotal, platformFee, deliveryFee, gst, total } = useMemo(() => {
-    if (pSub && pPlat && pDel && pGst && pTot) {
-      return {
-        subTotal: Number(pSub),
-        platformFee: Number(pPlat),
-        deliveryFee: Number(pDel),
-        gst: Number(pGst),
-        total: Number(pTot),
-      };
+  /* ---------- Platform fees (same as Cart) ---------- */
+  const [platformFeeCfg, setPlatformFeeCfg] = useState(5);
+  const [deliveryFeeBase, setDeliveryFeeBase] = useState(29);
+  const [freeDeliveryThreshold, setFreeDeliveryThreshold] = useState(399);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        if (!PLATFORM_COLLECTION_ID || !PLATFORM_DOC_ID) return;
+        const doc = await databases.getDocument(DB_ID, PLATFORM_COLLECTION_ID, PLATFORM_DOC_ID);
+        if (!mounted) return;
+        setPlatformFeeCfg(Number((doc as any).platformFee ?? 5));
+        setDeliveryFeeBase(Number((doc as any).deliveryFee ?? 29));
+        setFreeDeliveryThreshold(Number((doc as any).freeDeliveryThreshold ?? 399));
+      } catch {
+        // keep defaults on failure
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  /* ---------- Availability: items ---------- */
+  const [availability, setAvailability] = useState<Record<string, boolean>>({});
+  const [checkingAvail, setCheckingAvail] = useState(false);
+
+  const checkAvailability = useCallback(async () => {
+    if (!MENU_ITEMS || restLines.length === 0) {
+      setAvailability({});
+      return;
     }
-    return calculateTotals(restLines);
-  }, [pSub, pPlat, pDel, pGst, pTot, restLines]);
+    setCheckingAvail(true);
+    try {
+      const ids = restLines.map((l) => l.item.id);
+      const res = await databases.listDocuments<MenuItemDoc>(DB_ID, MENU_ITEMS, [
+        Query.equal("$id", ids),
+        Query.limit(Math.max(ids.length, 100)),
+      ]);
+      const map: Record<string, boolean> = {};
+      (res.documents || []).forEach((d) => {
+        map[d.$id] = (d as any).available !== false; // default true
+      });
+      ids.forEach((id) => {
+        if (!(id in map)) map[id] = true;
+      });
+      setAvailability(map);
+    } catch {
+      // assume current state if error
+    } finally {
+      setCheckingAvail(false);
+    }
+  }, [restLines]);
+
+  /* ---------- Availability: restaurant open ---------- */
+  const [isRestaurantOpen, setIsRestaurantOpen] = useState<boolean | null>(null);
+  const [checkingRestaurant, setCheckingRestaurant] = useState(false);
+
+  const checkRestaurantOpen = useCallback(async () => {
+    if (!RESTAURANTS || !rid) return;
+    setCheckingRestaurant(true);
+    try {
+      const doc = await databases.getDocument(DB_ID, RESTAURANTS, rid);
+      const open = typeof (doc as any).open === "boolean" ? (doc as any).open : true;
+      setIsRestaurantOpen(open);
+    } catch {
+      // if not readable, don't hard-block: assume open
+      setIsRestaurantOpen(true);
+    } finally {
+      setCheckingRestaurant(false);
+    }
+  }, [rid]);
+
+  /* ---------- Initial checks ---------- */
+  useEffect(() => {
+    checkAvailability();
+    checkRestaurantOpen();
+  }, [checkAvailability, checkRestaurantOpen]);
+
+  /* ---------- Available vs Unavailable lines ---------- */
+  const availableLines = useMemo(
+    () => restLines.filter((l) => availability[l.item.id] !== false),
+    [restLines, availability]
+  );
+  const unavailableLines = useMemo(
+    () => restLines.filter((l) => availability[l.item.id] === false),
+    [restLines, availability]
+  );
+
+  /* ---------- Promo from Cart (optional) ---------- */
+  const promoCode = (pCode || "").toString();
+  const promoDiscountFromCart = Number(pDisc || 0);
+
+  /* ---------- Totals from *available* lines only ---------- */
+  const subTotal = useMemo(
+    () => availableLines.reduce((sum, l) => sum + Number(l.item.price) * Number(l.qty), 0),
+    [availableLines]
+  );
+
+  const promoDiscount = clamp(Math.min(subTotal, promoDiscountFromCart));
+  const deliveryFeeRaw = subTotal >= freeDeliveryThreshold ? 0 : deliveryFeeBase;
+  const deliveryFee = deliveryFeeRaw; // if you add freeship here, zero when the promo is freeship
+  const platformFee = platformFeeCfg;
+  const gstBase = Math.max(0, subTotal - promoDiscount) + platformFee + deliveryFee;
+  const gst = Math.round(gstBase * 0.05);
+  const total = clamp(subTotal - promoDiscount + platformFee + deliveryFee + gst);
 
   /* ---------- Payment ---------- */
   const [method, setMethod] = useState<"COD" | "UPI" | "CARD" | null>("COD");
@@ -129,13 +244,10 @@ export default function CheckoutScreen() {
   /* ---------- Order flow ---------- */
   const [showCountdown, setShowCountdown] = useState(false);
   const [placing, setPlacing] = useState(false);
-  const [lastOrderId, setLastOrderId] = useState<string | null>(null);
-
-  // Track an existing pending UPI order, and a prefetch target
   const [pendingUPIRef, setPendingUPIRef] = useState<string | null>(null);
   const [prefetchRefId, setPrefetchRefId] = useState<string | null>(null);
 
-  // Prefetch hook: once we have a referenceId to prefetch for, it warms the link.
+  // Prefetch hook: once we have a referenceId, it warms the UPI link.
   const callbackUrl = Linking.createURL(`/orders/${prefetchRefId || ""}`);
   const { ensure: ensureUPILink } = useUPILink({
     referenceId: prefetchRefId || "",
@@ -145,7 +257,7 @@ export default function CheckoutScreen() {
       return a?.fullName;
     })(),
     callbackUrl,
-    auto: !!prefetchRefId, // begin prefetch automatically when we set one
+    auto: !!prefetchRefId,
   });
 
   /* ---------- Load user + addresses ---------- */
@@ -210,9 +322,9 @@ export default function CheckoutScreen() {
             Query.limit(100),
           ]);
           await Promise.all(
-            (res.documents ?? []).map((d) =>
-              databases.updateDocument(DB_ID, ADDR_COLLECTION_ID, d.$id, { isDefault: false })
-            )
+            (res.documents ?? []).map((d) => databases.updateDocument(DB_ID, ADDR_COLLECTION_ID, d.$id, {
+              isDefault: false,
+            }))
           );
         }
         const created = await databases.createDocument<AddressDoc>(DB_ID, ADDR_COLLECTION_ID, "unique()", {
@@ -295,16 +407,19 @@ export default function CheckoutScreen() {
   );
 
   /* ---------- Validation ---------- */
-  const isValid = !!selectedAddrId && method !== null && restLines.length > 0;
+  const hasAnyAvailable = availableLines.length > 0;
+  const isValid = !!selectedAddrId && method !== null && hasAnyAvailable && isRestaurantOpen !== false;
 
-  /* ---------- Prefetch: when countdown opens with UPI, create/reuse doc and warm the link ---------- */
+  /* ---------- UPI Prefetch: only when NO unavailable lines and restaurant is open ---------- */
   useEffect(() => {
     if (!showCountdown || method !== "UPI" || !ORDERS_COLLECTION_ID || !selectedAddress || !userId) return;
+    if (!hasAnyAvailable || unavailableLines.length > 0) return;
+    if (isRestaurantOpen === false) return;
 
     (async () => {
       try {
-        // create/reuse the pending UPI order now (no UI block)
-        const itemsArr = restLines.map((l) => ({
+        // Pre-create/reuse the pending UPI order using AVAILABLE lines only
+        const itemsArr = availableLines.map((l) => ({
           id: l.item.id,
           name: l.item.name,
           price: Number(l.item.price),
@@ -320,7 +435,7 @@ export default function CheckoutScreen() {
           platformFee,
           deliveryFee,
           gst,
-          discount: 0,
+          discount: promoDiscount,
           total,
           address: JSON.stringify({
             fullName: selectedAddress.fullName,
@@ -374,11 +489,10 @@ export default function CheckoutScreen() {
         }
 
         setPendingUPIRef(referenceId);
-        setPrefetchRefId(referenceId); // triggers useUPILink(auto) to warm the link
-        // ensure explicitly (parallel), just in case auto is delayed by React scheduling
+        setPrefetchRefId(referenceId);
         await ensureUPILink();
       } catch {
-        // ignore prefetch errors; payPendingUPI will still handle on press
+        // ignore prefetch errors
       }
     })();
   }, [
@@ -389,162 +503,230 @@ export default function CheckoutScreen() {
     userId,
     rid,
     restaurantName,
-    restLines,
+    availableLines,
     subTotal,
     platformFee,
     deliveryFee,
     gst,
     total,
+    promoDiscount,
     pendingUPIRef,
     ensureUPILink,
+    hasAnyAvailable,
+    unavailableLines.length,
+    isRestaurantOpen,
   ]);
 
-  /* ---------- Place order ---------- */
-  const startPlaceOrder = () => {
-    if (!isValid) {
-      Alert.alert("Missing details", "Please select an address and payment method.");
+  /* ---------- Pull to refresh ---------- */
+  const [refreshing, setRefreshing] = useState(false);
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await Promise.all([checkAvailability(), checkRestaurantOpen()]);
+    setRefreshing(false);
+  }, [checkAvailability, checkRestaurantOpen]);
+
+  /* ---------- Start order flow ---------- */
+  const startPlaceOrder = async () => {
+    await Promise.all([checkAvailability(), checkRestaurantOpen()]);
+
+    if (isRestaurantOpen === false) {
+      Alert.alert("Restaurant closed", "This restaurant is currently closed. Please try again later.");
       return;
     }
+
+    if (!hasAnyAvailable) {
+      Alert.alert(
+        "No available items",
+        "All items in your cart are currently unavailable. Please remove them to continue.",
+        [
+          { text: "OK", style: "cancel" },
+          {
+            text: "Remove all",
+            style: "destructive",
+            onPress: () => {
+              restLines.forEach((l) => removeItem(rid, l.item.id));
+              router.replace(`/restaurants/${rid}`);
+            },
+          },
+        ]
+      );
+      return;
+    }
+
+    if (unavailableLines.length > 0) {
+      const names = unavailableLines.map((l) => `• ${l.item.name}`).join("\n");
+      Alert.alert("Some items are unavailable", `${names}\n\nRemove these and continue?`, [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove & Continue",
+          style: "destructive",
+          onPress: () => {
+            unavailableLines.forEach((l) => removeItem(rid, l.item.id));
+            setShowCountdown(true);
+          },
+        },
+      ]);
+      return;
+    }
+
     setShowCountdown(true);
   };
+
   const cancelCountdown = () => setShowCountdown(false);
 
-  const doPlaceOrder = useCallback(async () => {
-    setShowCountdown(false);
-    if (!ORDERS_COLLECTION_ID || !selectedAddress || !userId) return;
+  /* ---------- Place order ---------- */
+  const doPlaceOrder = useCallback(
+    async () => {
+      setShowCountdown(false);
+      if (!ORDERS_COLLECTION_ID || !selectedAddress || !userId) return;
 
-    setPlacing(true);
-    try {
-      const itemsArr = restLines.map((l) => ({
-        id: l.item.id,
-        name: l.item.name,
-        price: Number(l.item.price),
-        qty: l.qty,
-      }));
-
-      const payload: Partial<OrderDoc> = {
-        userId,
-        restaurantId: rid,
-        restaurantName,
-        items: JSON.stringify(itemsArr),
-        subTotal,
-        platformFee,
-        deliveryFee,
-        gst,
-        discount: 0,
-        total,
-        address: JSON.stringify({
-          fullName: selectedAddress.fullName,
-          phone: selectedAddress.phone,
-          line1: selectedAddress.line1,
-          landmark: selectedAddress.landmark || "",
-          pincode: selectedAddress.pincode,
-          city: selectedAddress.city,
-          state: selectedAddress.state,
-          country: selectedAddress.country,
-          isDefault: !!selectedAddress.isDefault,
-        }),
-        paymentMethod: method!,
-        paymentStatus: "pending",
-        status: method === "UPI" ? ("pending_payment" as any) : "placed",
-      };
-
-      if (method === "UPI") {
-        // Use the prefetched reference if available
-        let referenceId = prefetchRefId || pendingUPIRef;
-
-        if (!referenceId) {
-          try {
-            const res = await databases.listDocuments<OrderDoc>(DB_ID, ORDERS_COLLECTION_ID, [
-              Query.equal("userId", userId),
-              Query.equal("restaurantId", rid),
-              Query.equal("paymentMethod", "UPI"),
-              Query.equal("status", "pending_payment"),
-              Query.orderDesc("$createdAt"),
-              Query.limit(1),
-            ]);
-            const existing = res.documents?.[0];
-            if (existing?.$id) referenceId = existing.$id;
-          } catch {}
-        }
-
-        if (!referenceId) {
-          const created = await databases.createDocument<OrderDoc>(
-            DB_ID,
-            ORDERS_COLLECTION_ID,
-            "unique()",
-            payload as any
-          );
-          await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, created.$id, {
-            referenceId: created.$id,
-          });
-          referenceId = created.$id;
-        } else {
-          await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, referenceId, {
-            total,
-            items: JSON.stringify(itemsArr),
-          });
-        }
-
-        setPendingUPIRef(referenceId);
-        setPrefetchRefId(referenceId);
-
-        // Launch UPI (now server is already warm; should feel instant)
-        await payPendingUPI({
-          referenceId,
-          amount: total,
-          customerName: selectedAddress.fullName,
-          onPaid: () => {
-            setPendingUPIRef(null);
-            clearRestaurant(rid);
-            Alert.alert("Payment received 🎉", "Your order is confirmed.");
-          },
-          onStillPending: () => {
-            // user closed or still pending – show Pay button again
-          },
-        });
-
-        setPlacing(false);
+      // Final sanity checks
+      await Promise.all([checkAvailability(), checkRestaurantOpen()]);
+      if (isRestaurantOpen === false) {
+        Alert.alert("Restaurant closed", "This restaurant is currently closed. Please try again later.");
+        return;
+      }
+      if (!hasAnyAvailable) {
+        Alert.alert("Cart empty", "No available items to order.");
+        return;
+      }
+      if (unavailableLines.length > 0) {
+        Alert.alert("Still unavailable", "Please remove unavailable items first.");
         return;
       }
 
-      // ---------- COD FLOW ----------
-      const created = await databases.createDocument<OrderDoc>(
-        DB_ID,
-        ORDERS_COLLECTION_ID,
-        "unique()",
-        payload as any
-      );
-      await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, created.$id, {
-        referenceId: created.$id,
-      });
+      setPlacing(true);
+      try {
+        const itemsArr = availableLines.map((l) => ({
+          id: l.item.id,
+          name: l.item.name,
+          price: Number(l.item.price),
+          qty: l.qty,
+        }));
 
-      setLastOrderId(created.$id);
-      clearRestaurant(rid);
-      router.replace("/order"); // go to order list quietly
-    } catch (e: any) {
-      Alert.alert("Failed", e?.message || "Could not place the order.");
-    } finally {
-      setPlacing(false);
-    }
-  }, [
-    ORDERS_COLLECTION_ID,
-    selectedAddress,
-    userId,
-    rid,
-    restaurantName,
-    restLines,
-    subTotal,
-    platformFee,
-    deliveryFee,
-    gst,
-    total,
-    method,
-    prefetchRefId,
-    pendingUPIRef,
-    clearRestaurant,
-    router,
-  ]);
+        const payload: Partial<OrderDoc> = {
+          userId,
+          restaurantId: rid,
+          restaurantName,
+          items: JSON.stringify(itemsArr),
+          subTotal,
+          platformFee,
+          deliveryFee,
+          gst,
+          discount: promoDiscount,
+          total,
+          address: JSON.stringify({
+            fullName: selectedAddress.fullName,
+            phone: selectedAddress.phone,
+            line1: selectedAddress.line1,
+            landmark: selectedAddress.landmark || "",
+            pincode: selectedAddress.pincode,
+            city: selectedAddress.city,
+            state: selectedAddress.state,
+            country: selectedAddress.country,
+            isDefault: !!selectedAddress.isDefault,
+          }),
+          paymentMethod: method!,
+          paymentStatus: "pending",
+          status: method === "UPI" ? ("pending_payment" as any) : "placed",
+        };
+
+        if (method === "UPI") {
+          // Use the prefetched reference if available
+          let referenceId = prefetchRefId || pendingUPIRef;
+
+          if (!referenceId) {
+            try {
+              const res = await databases.listDocuments<OrderDoc>(DB_ID, ORDERS_COLLECTION_ID, [
+                Query.equal("userId", userId),
+                Query.equal("restaurantId", rid),
+                Query.equal("paymentMethod", "UPI"),
+                Query.equal("status", "pending_payment"),
+                Query.orderDesc("$createdAt"),
+                Query.limit(1),
+              ]);
+              const existing = res.documents?.[0];
+              if (existing?.$id) referenceId = existing.$id;
+            } catch {}
+          }
+
+          if (!referenceId) {
+            const created = await databases.createDocument<OrderDoc>(
+              DB_ID,
+              ORDERS_COLLECTION_ID,
+              "unique()",
+              payload as any
+            );
+            await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, created.$id, {
+              referenceId: created.$id,
+            });
+            referenceId = created.$id;
+          } else {
+            await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, referenceId, {
+              total,
+              items: JSON.stringify(itemsArr),
+            });
+          }
+
+          await payPendingUPI({
+            referenceId,
+            amount: total,
+            customerName: selectedAddress.fullName,
+            onPaid: () => {
+              clearRestaurant(rid);
+              Alert.alert("Payment received 🎉", "Your order is confirmed.");
+            },
+            onStillPending: () => {},
+          });
+
+          setPlacing(false);
+          return;
+        }
+
+        // ---------- COD FLOW ----------
+        const created = await databases.createDocument<OrderDoc>(
+          DB_ID,
+          ORDERS_COLLECTION_ID,
+          "unique()",
+          payload as any
+        );
+        await databases.updateDocument(DB_ID, ORDERS_COLLECTION_ID, created.$id, {
+          referenceId: created.$id,
+        });
+
+        clearRestaurant(rid);
+        router.replace("/order");
+      } catch (e: any) {
+        Alert.alert("Failed", e?.message || "Could not place the order.");
+      } finally {
+        setPlacing(false);
+      }
+    },
+    [
+      ORDERS_COLLECTION_ID,
+      selectedAddress,
+      userId,
+      rid,
+      restaurantName,
+      availableLines,
+      unavailableLines.length,
+      subTotal,
+      platformFee,
+      deliveryFee,
+      gst,
+      total,
+      promoDiscount,
+      method,
+      prefetchRefId,
+      pendingUPIRef,
+      clearRestaurant,
+      router,
+      checkAvailability,
+      checkRestaurantOpen,
+      isRestaurantOpen,
+      hasAnyAvailable,
+    ]
+  );
 
   const deleteAddress = useCallback(
     async (addrId: string) => {
@@ -588,24 +770,60 @@ export default function CheckoutScreen() {
   /* ---------- UI ---------- */
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: "#fff", paddingTop: Math.max(insets.top * 0.3, 0) }}>
-      <LinearGradient colors={["#FFF7ED", "#FFFFFF"]} start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }} style={{ padding: 16, paddingBottom: 10 }}>
+      <LinearGradient
+        colors={["#FFF7ED", "#FFFFFF"]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={{ padding: 16, paddingBottom: 10 }}
+      >
         <View style={styles.topBar}>
           <TouchableOpacity style={styles.iconBtn} onPress={goBack}>
             <Ionicons name="chevron-back" size={22} />
           </TouchableOpacity>
           <Text style={styles.heading}>Checkout</Text>
-          <View style={styles.iconBtn} />
+          <TouchableOpacity style={styles.iconBtn} onPress={onRefresh}>
+            <Ionicons name="refresh" size={20} />
+          </TouchableOpacity>
         </View>
 
         <View style={styles.summaryStrip}>
           <View>
             <Text style={{ fontWeight: "900", fontSize: 16 }}>{restaurantName}</Text>
-            <Text style={{ color: MUTED, fontWeight: "700" }}>Items: {restLines.length}</Text>
+            <Text style={{ color: MUTED, fontWeight: "700" }}>
+              Items: {availableLines.length}
+              {unavailableLines.length > 0 ? `  •  ${unavailableLines.length} unavailable` : ""}
+            </Text>
           </View>
           <View style={styles.totalPill}>
             <Text style={{ color: "#fff", fontWeight: "900" }}>₹ {total.toFixed(0)}</Text>
           </View>
         </View>
+
+        {isRestaurantOpen === false && (
+          <View style={styles.closedBanner}>
+            <Ionicons name="alert-circle-outline" size={16} color={RED} />
+            <Text style={styles.closedText}>Restaurant is closed right now. You can’t place an order.</Text>
+            <TouchableOpacity onPress={onRefresh} style={styles.fixBtn}>
+              <Text style={styles.fixBtnText}>Refresh</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {unavailableLines.length > 0 && (
+          <View style={styles.unavailableBanner}>
+            <Ionicons name="warning-outline" size={16} color={RED} />
+            <Text style={styles.unavailableText}>Some items are unavailable. Remove them to continue.</Text>
+            <TouchableOpacity
+              onPress={() => {
+                unavailableLines.forEach((l) => removeItem(rid, l.item.id));
+                checkAvailability();
+              }}
+              style={styles.fixBtn}
+            >
+              <Text style={styles.fixBtnText}>Remove</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </LinearGradient>
 
       <KeyboardAvoidingView
@@ -613,10 +831,17 @@ export default function CheckoutScreen() {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         keyboardVerticalOffset={Platform.select({ ios: 80, android: 0 }) as number}
       >
-        <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 120 }} keyboardShouldPersistTaps="always" removeClippedSubviews={false}>
+        <ScrollView
+          contentContainerStyle={{ padding: 16, paddingBottom: 120 }}
+          keyboardShouldPersistTaps="always"
+          removeClippedSubviews={false}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+        >
           <Text style={styles.sectionLabel}>Saved Addresses</Text>
           {addresses.length === 0 ? (
-            <Text style={{ color: MUTED, fontWeight: "700", marginBottom: 10 }}>No addresses yet — add one below.</Text>
+            <Text style={{ color: MUTED, fontWeight: "700", marginBottom: 10 }}>
+              No addresses yet — add one below.
+            </Text>
           ) : (
             addresses.map((a) => (
               <AddressCard
@@ -674,25 +899,44 @@ export default function CheckoutScreen() {
       {/* Sticky footer */}
       <View style={[styles.sticky, { paddingBottom: Math.max(insets.bottom + 8, 16) }]}>
         <TouchableOpacity
-          disabled={!isValid || placing}
+          disabled={!isValid || placing || checkingAvail || checkingRestaurant}
           onPress={startPlaceOrder}
           activeOpacity={0.9}
-          style={[styles.placeBtn, { backgroundColor: isValid && !placing ? GREEN : "#9CA3AF" }]}
+          style={[
+            styles.placeBtn,
+            { backgroundColor: isValid && !placing && !checkingAvail && !checkingRestaurant ? GREEN : "#9CA3AF" },
+          ]}
         >
           <View style={[styles.badge, { backgroundColor: "#14532D" }]}>
             <Ionicons name="shield-checkmark-outline" size={14} color="#fff" />
             <Text style={styles.badgeText}>Secure</Text>
           </View>
-          <Text style={styles.placeText}>{method === "UPI" ? (placing ? "Creating Link…" : "Pay with UPI") : placing ? "Placing…" : "Place Order"}</Text>
+          <Text style={styles.placeText}>
+            {placing
+              ? method === "UPI"
+                ? "Creating Link…"
+                : "Placing…"
+              : checkingAvail || checkingRestaurant
+              ? "Checking availability…"
+              : method === "UPI"
+              ? "Pay with UPI"
+              : "Place Order"}
+          </Text>
         </TouchableOpacity>
       </View>
 
       <PlaceOrderSheet
         visible={showCountdown}
         amount={total}
-        methodLabel={method === "UPI" ? `Pay ₹${total.toFixed(0)} via UPI (Razorpay)` : `Pay ₹${total.toFixed(0)} on delivery (UPI/cash)`}
+        methodLabel={
+          method === "UPI"
+            ? `Pay ₹${total.toFixed(0)} via UPI (Razorpay)`
+            : `Pay ₹${total.toFixed(0)} on delivery (UPI/cash)`
+        }
         addressTitle={`Delivering to ${selectedAddress?.landmark ? "Home" : selectedAddress?.city || "address"}`}
-        addressLine={[selectedAddress?.line1, selectedAddress?.city, selectedAddress?.state, selectedAddress?.country].filter(Boolean).join(", ")}
+        addressLine={[selectedAddress?.line1, selectedAddress?.city, selectedAddress?.state, selectedAddress?.country]
+          .filter(Boolean)
+          .join(", ")}
         onCancel={cancelCountdown}
         onDone={doPlaceOrder}
         durationMs={4000}
@@ -741,6 +985,34 @@ const styles = StyleSheet.create({
 
   summaryStrip: { marginTop: 10, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   totalPill: { backgroundColor: ACCENT, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999 },
+
+  closedBanner: {
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#FECACA",
+    backgroundColor: "#FEF2F2",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  closedText: { color: "#991B1B", fontWeight: "800", flex: 1 },
+
+  unavailableBanner: {
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#FECACA",
+    backgroundColor: "#FEF2F2",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  unavailableText: { color: "#991B1B", fontWeight: "800", flex: 1 },
+  fixBtn: { backgroundColor: "#DC2626", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 },
+  fixBtnText: { color: "#fff", fontWeight: "900" },
 
   sectionLabel: { marginTop: 14, marginBottom: 8, marginLeft: 6, color: PRIMARY, fontWeight: "900", fontSize: 14 },
 

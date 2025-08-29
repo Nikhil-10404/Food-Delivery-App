@@ -1,3 +1,4 @@
+// app/item/[id].tsx
 import React, { useEffect, useState, useCallback } from "react";
 import {
   View,
@@ -27,7 +28,7 @@ type Params = {
   id: string;
   restaurantId?: string;
   restaurantName?: string;
-  back?: string;              // 👈 added
+  back?: string;
 };
 
 type MenuItemDoc = Models.Document & {
@@ -39,6 +40,7 @@ type MenuItemDoc = Models.Document & {
   veg?: boolean;
   category?: string;
   pairWith?: string[];
+  available?: boolean;          // 👈 NEW
 };
 
 type RatingDoc = Models.Document & { itemId: string; userId: string; value: number };
@@ -47,9 +49,8 @@ export default function ItemDetails() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { back: backParam } = useLocalSearchParams<{ back?: string }>();
-const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
-   const { id, restaurantId, restaurantName, back } =
-    useLocalSearchParams<Params>();
+  const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
+  const { id, restaurantId, restaurantName } = useLocalSearchParams<Params>();
 
   const [item, setItem] = useState<MenuItemDoc | null>(null);
   const [loading, setLoading] = useState(true);
@@ -66,7 +67,7 @@ const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
 
   // cart (no qty stepper here)
   const [showMiniBar, setShowMiniBar] = useState(false);
-  const { addItem, removeItem, getItemQty, getRestaurantCount } = useCart();
+  const { addItem, removeItem } = useCart();
 
   const showToast = (msg: string) => {
     if (Platform.OS === "android") ToastAndroid.show(msg, ToastAndroid.SHORT);
@@ -80,7 +81,11 @@ const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
       try {
         const doc = await databases.getDocument<MenuItemDoc>(DB_ID, MENU_ITEMS, String(id));
         if (!mounted) return;
-        setItem({ ...doc, price: Number(doc.price) });
+        setItem({
+          ...doc,
+          price: Number(doc.price),
+          available: typeof (doc as any).available === "boolean" ? (doc as any).available : true, // 👈
+        });
       } catch (e) {
         console.warn("Item fetch failed", e);
       } finally {
@@ -174,15 +179,12 @@ const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
     };
   }, [item?.pairWith]);
 
-  // Back: prefer true back; if no history, go to restaurant details
-   const onBack = () => {
-  // @ts-ignore expo-router exposes canGoBack on native
+  // Back
+  const onBack = () => {
     router.replace(`/restaurants/${rId}`);
-  
-};
+  };
 
-
-  const goCart = () => rId && router.push(`/cart/${rId}`); 
+  const goCart = () => rId && router.push(`/cart/${rId}`);
 
   const submitRating = async (value: number) => {
     if (ratingBusy || !id) return;
@@ -224,15 +226,20 @@ const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
     }
   };
 
+  const isAvailable = item?.available !== false;
+
   const handleAdd = () => {
     if (!item || !rId) return;
+    if (!isAvailable) {
+      showToast("This item is not available right now.");
+      return;
+    }
     addItem({
       restaurantId: rId,
       restaurantName: rName,
       item: { id: item.$id, name: item.name, price: Number(item.price), photoId: item.photoId },
       qty: 1,
     });
-    // ✅ instantly show mini bar and the UI flips because of zustand selector above
     setShowMiniBar(true);
     showToast("Added to cart ✓");
     setTimeout(() => setShowMiniBar(false), 4000);
@@ -271,11 +278,11 @@ const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
 
   return (
     <View style={{ flex: 1, backgroundColor: "#fff" }}>
-      {/* Top bar — lowered more */}
+      {/* Top bar */}
       <View
         style={[
           styles.topBar,
-          { paddingTop: Math.max(insets.top * 2, 10), marginBottom: 30 }, // lower the icons
+          { paddingTop: Math.max(insets.top * 2, 10), marginBottom: 30 },
         ]}
       >
         <TouchableOpacity onPress={onBack} style={[styles.iconBtn, { marginTop: 6 }]}>
@@ -316,24 +323,26 @@ const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
           <Text style={[styles.metaText, { opacity: 0.7 }]}> ({count})</Text>
         </View>
 
-        {/* Rate */}
-        <View style={{ marginTop: 10 }}>
-          <Text style={styles.sectionTitle}>Rate this item</Text>
-          <View style={styles.starsRow}>
-            {[1, 2, 3, 4, 5].map((v) => (
-              <TouchableOpacity key={v} onPress={() => submitRating(v)} disabled={ratingBusy} style={styles.starBtn}>
-                <Ionicons
-                  name={(myRating ?? 0) >= v ? "star" : "star-outline"}
-                  size={28}
-                  color={(myRating ?? 0) >= v ? "#F59E0B" : undefined}
-                />
-              </TouchableOpacity>
-            ))}
+        {/* Availability banner */}
+        {!isAvailable && (
+          <View
+            style={{
+              marginTop: 10,
+              padding: 10,
+              backgroundColor: "#FEF2F2",
+              borderColor: "#FECACA",
+              borderWidth: 1,
+              borderRadius: 10,
+            }}
+          >
+            <Text style={{ color: "#991B1B", fontWeight: "800" }}>
+              This item is not available right now.
+            </Text>
+            <Text style={{ color: "#991B1B", marginTop: 4 }}>
+              Please choose another item.
+            </Text>
           </View>
-          <Text style={{ marginTop: 4, opacity: 0.7 }}>
-            {myRating ? `Your rating: ${myRating}★` : "Tap a star to submit"}
-          </Text>
-        </View>
+        )}
 
         {!!item.description && <Text style={styles.desc}>{item.description}</Text>}
 
@@ -365,8 +374,13 @@ const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
       {/* Sticky CTA — Add OR full-width red Remove */}
       <View style={styles.ctaBar}>
         {!isInCart ? (
-          <TouchableOpacity style={styles.addBtn} onPress={handleAdd} activeOpacity={0.9}>
-            <Text style={styles.addText}>Add to Cart</Text>
+          <TouchableOpacity
+            style={[styles.addBtn, !isAvailable && { backgroundColor: "#9CA3AF" }]}
+            onPress={handleAdd}
+            activeOpacity={0.9}
+            disabled={!isAvailable}
+          >
+            <Text style={styles.addText}>{isAvailable ? "Add to Cart" : "Not available"}</Text>
           </TouchableOpacity>
         ) : (
           <TouchableOpacity style={styles.removeBtn} onPress={handleRemove} activeOpacity={0.9}>
@@ -376,7 +390,7 @@ const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
         )}
       </View>
 
-      {/* Mini view bar — single way to jump to cart */}
+      {/* Mini view bar */}
       {(showMiniBar || isInCart) && (
         <MiniCartBar
           onPress={() => {
@@ -390,7 +404,6 @@ const safeBack = backParam && backParam.startsWith("/") ? backParam : undefined;
   );
 }
 
-/* Mini bar component */
 function MiniCartBar({ onPress, count }: { onPress: () => void; count: number }) {
   return (
     <TouchableOpacity activeOpacity={0.95} onPress={onPress} style={styles.miniBar}>
@@ -466,7 +479,6 @@ const styles = StyleSheet.create({
   addBtn: { flex: 1, backgroundColor: GREEN, borderRadius: 14, paddingVertical: 16, alignItems: "center" },
   addText: { color: "#fff", fontSize: 16, fontWeight: "800" },
 
-  // Full-width red remove
   removeBtn: {
     flex: 1,
     backgroundColor: "#EF4444",

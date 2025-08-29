@@ -14,10 +14,11 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useLocalSearchParams, useRouter } from "expo-router";
-import { databases, appwriteConfig } from "@/lib/appwrite";
+import { useLocalSearchParams, useRouter, usePathname } from "expo-router";
+import { databases, appwriteConfig } from "@/lib/appwrite"; // 👈 realtime
 import { Query, Models } from "react-native-appwrite";
-import { usePathname } from "expo-router";
+import { client } from "@/lib/appwrite";
+
 
 const DB_ID = appwriteConfig.databaseId;
 const RESTAURANTS_COLLECTION_ID = appwriteConfig.Restaurant_Collection_ID;
@@ -30,6 +31,7 @@ type MenuItemDoc = Models.Document & {
   restaurant: string;
   description?: string;
   category?: string;
+  available?: boolean;               // 👈 NEW
 };
 
 type RestaurantDoc = Models.Document & {
@@ -110,24 +112,41 @@ export default function RestaurantDetails() {
       if (Array.isArray(rel) && rel.length > 0) {
         const first = rel[0] as any;
         if (first && typeof first === "object" && first.name !== undefined) {
-          embedded = (rel as any[]).filter(Boolean).map((m: any) => ({
-            $id: m.$id, $databaseId: m.$databaseId, $collectionId: m.$collectionId,
-            $createdAt: m.$createdAt, $updatedAt: m.$updatedAt, $permissions: m.$permissions, $sequence: m.$sequence,
-            name: m.name, price: Number(m.price), photoId: m.photoId, restaurant: m.restaurant,
-            description: m.description, category: m.category,
-          })) as MenuItemDoc[];
+          embedded = (rel as any[])
+            .filter(Boolean)
+            .map((m: any) => ({
+              $id: m.$id,
+              $databaseId: m.$databaseId,
+              $collectionId: m.$collectionId,
+              $createdAt: m.$createdAt,
+              $updatedAt: m.$updatedAt,
+              $permissions: m.$permissions,
+              $sequence: m.$sequence,
+              name: m.name,
+              price: Number(m.price),
+              photoId: m.photoId,
+              restaurant: m.restaurant,
+              description: m.description,
+              category: m.category,
+              available: typeof m.available === "boolean" ? m.available : true, // 👈
+            })) as MenuItemDoc[];
         }
       }
 
       if (embedded) {
         setItems(embedded.sort((a, b) => a.name.localeCompare(b.name)));
       } else {
-        const list = await databases.listDocuments<MenuItemDoc>(
-          DB_ID,
-          MENU_ITEMS_COLLECTION_ID,
-          [Query.equal("restaurant", restaurantId), Query.orderAsc("name")]
+        const list = await databases.listDocuments<MenuItemDoc>(DB_ID, MENU_ITEMS_COLLECTION_ID, [
+          Query.equal("restaurant", restaurantId),
+          Query.orderAsc("name"),
+        ]);
+        setItems(
+          (list.documents || []).map((d) => ({
+            ...d,
+            price: Number(d.price),
+            available: typeof (d as any).available === "boolean" ? (d as any).available : true, // 👈
+          }))
         );
-        setItems((list.documents || []).map(d => ({ ...d, price: Number(d.price) })));
       }
 
       setSelectedCategory("All");
@@ -144,6 +163,43 @@ export default function RestaurantDetails() {
     fetchData();
   }, [fetchData]);
 
+  // 🔔 Realtime: update when any item of this restaurant changes
+  useEffect(() => {
+    if (!restaurantId) return;
+    const channel = `databases.${DB_ID}.collections.${MENU_ITEMS_COLLECTION_ID}.documents`;
+const unsubscribe = client.subscribe(channel, (ev: any) => {
+  // ev.events contains create/update/delete
+  const p: any = ev?.payload;
+  if (!p || String(p.restaurant) !== String(restaurantId)) return;
+
+  const incoming: MenuItemDoc = {
+    ...p,
+    price: Number(p.price),
+    available: typeof p.available === "boolean" ? p.available : true,
+  };
+
+  setItems((prev) => {
+    if (ev.events?.some((e: string) => e.endsWith(".delete"))) {
+      return prev.filter((x) => x.$id !== incoming.$id);
+    }
+    const idx = prev.findIndex((x) => x.$id === incoming.$id);
+    if (idx === -1) {
+      return [...prev, incoming].sort((a, b) => a.name.localeCompare(b.name));
+    }
+    const copy = [...prev];
+    copy[idx] = { ...copy[idx], ...incoming };
+    return copy;
+  });
+});
+
+
+    return () => {
+      try {
+        unsubscribe();
+      } catch {}
+    };
+  }, [restaurantId]);
+
   const onRefresh = useCallback(async () => {
     try {
       setRefreshing(true);
@@ -153,46 +209,69 @@ export default function RestaurantDetails() {
     }
   }, [fetchData]);
 
-  const renderItem = ({ item }: { item: MenuItemDoc }) => (
-    <TouchableOpacity
-      onPress={() => {
-        // 👉 go to Item Details with restaurant context
-       router.push({
-  pathname: "/item/[id]",
-  params: {
-    id: item.$id,
-    restaurantId,                         // keep cart context
-    restaurantName: restaurant?.name ?? "",
-    back: pathname,                       // 👈 tell item page where to go "back" to
-  },
-});
-      }}
-    >
-      <View style={styles.itemCard}>
-        {item.photoId ? (
-          <ExpoImage
-            source={{ uri: item.photoId }}
-            style={styles.itemImage}
-            contentFit="cover"
-            transition={120}
-            onError={(e) => console.log("Image failed:", item.name, item.photoId, e)}
-          />
-        ) : (
-          <View style={[styles.itemImage, styles.itemImagePlaceholder]} />
-        )}
+  // 👇 availability-aware row
+  const renderItem = ({ item }: { item: MenuItemDoc }) => {
+    const isAvailable = item.available !== false;
 
-        <View style={styles.itemInfo}>
-          <Text style={styles.itemName} numberOfLines={2}>{item.name}</Text>
-          <Text style={styles.itemPrice}>₹ {Number(item.price).toFixed(0)}</Text>
-          {!!item.category && (
-            <View style={styles.catPill}>
-              <Text style={styles.catPillText}>{item.category}</Text>
-            </View>
+    return (
+      <TouchableOpacity
+        disabled={!isAvailable}
+        onPress={
+          isAvailable
+            ? () =>
+                router.push({
+                  pathname: "/item/[id]",
+                  params: {
+                    id: item.$id,
+                    restaurantId,
+                    restaurantName: restaurant?.name ?? "",
+                    back: pathname,
+                  },
+                })
+            : undefined
+        }
+        activeOpacity={isAvailable ? 0.6 : 1}
+      >
+        <View style={[styles.itemCard, !isAvailable && { opacity: 0.55 }]}>
+          {item.photoId ? (
+            <ExpoImage
+              source={{ uri: item.photoId }}
+              style={styles.itemImage}
+              contentFit="cover"
+              transition={120}
+              onError={(e) => console.log("Image failed:", item.name, item.photoId, e)}
+            />
+          ) : (
+            <View style={[styles.itemImage, styles.itemImagePlaceholder]} />
           )}
+
+          <View style={styles.itemInfo}>
+            <Text style={styles.itemName} numberOfLines={2}>
+              {item.name}
+            </Text>
+            <Text style={styles.itemPrice}>₹ {Number(item.price).toFixed(0)}</Text>
+
+            {!!item.category && (
+              <View style={styles.catPill}>
+                <Text style={styles.catPillText}>{item.category}</Text>
+              </View>
+            )}
+
+            <Text
+              style={{
+                marginTop: 6,
+                fontSize: 12,
+                fontWeight: "700",
+                color: isAvailable ? "#16A34A" : "#9CA3AF",
+              }}
+            >
+              {isAvailable ? "Available" : "Not available"}
+            </Text>
+          </View>
         </View>
-      </View>
-    </TouchableOpacity>
-  );
+      </TouchableOpacity>
+    );
+  };
 
   if (loading) {
     return (
@@ -220,11 +299,12 @@ export default function RestaurantDetails() {
         </TouchableOpacity>
         <View style={{ flex: 1 }} />
         <TouchableOpacity
-          // 👉 go to this restaurant's cart
-          onPress={() => router.push({
-  pathname: "/cart/[restaurantId]",
-  params: { restaurantId },
-})}
+          onPress={() =>
+            router.push({
+              pathname: "/cart/[restaurantId]",
+              params: { restaurantId },
+            })
+          }
           style={styles.iconBtn}
         >
           <Ionicons name="cart-outline" size={24} />
@@ -247,7 +327,9 @@ export default function RestaurantDetails() {
 
         <Text style={styles.title}>{restaurant.name}</Text>
         {!!restaurant.description && (
-          <Text style={styles.description} numberOfLines={3}>{restaurant.description}</Text>
+          <Text style={styles.description} numberOfLines={3}>
+            {restaurant.description}
+          </Text>
         )}
 
         {/* Hours + Days + Open/Closed */}
@@ -269,9 +351,22 @@ export default function RestaurantDetails() {
           </Text>
         </View>
 
-        <View style={[styles.statusPillBase, open ? styles.statusPillOpen : styles.statusPillClosed]}>
-          <Ionicons name={open ? "checkmark-circle-outline" : "close-circle-outline"} size={18} />
-          <Text style={[styles.statusTextBase, open ? styles.statusTextOpen : styles.statusTextClosed]}>
+        <View
+          style={[
+            styles.statusPillBase,
+            open ? styles.statusPillOpen : styles.statusPillClosed,
+          ]}
+        >
+          <Ionicons
+            name={open ? "checkmark-circle-outline" : "close-circle-outline"}
+            size={18}
+          />
+          <Text
+            style={[
+              styles.statusTextBase,
+              open ? styles.statusTextOpen : styles.statusTextClosed,
+            ]}
+          >
             {open ? "Open Now" : "Closed"}
           </Text>
         </View>
@@ -292,7 +387,12 @@ export default function RestaurantDetails() {
                 onPress={() => setSelectedCategory(cat)}
                 style={[styles.chip, active ? styles.chipActive : styles.chipInactive]}
               >
-                <Text style={[styles.chipText, active ? styles.chipTextActive : styles.chipTextInactive]}>
+                <Text
+                  style={[
+                    styles.chipText,
+                    active ? styles.chipTextActive : styles.chipTextInactive,
+                  ]}
+                >
                   {cat}
                 </Text>
               </TouchableOpacity>
@@ -328,7 +428,13 @@ const styles = StyleSheet.create({
     paddingTop: Platform.select({ ios: 6, android: 4, default: 6 }),
     paddingBottom: 10,
   },
-  iconBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
+  iconBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+  },
 
   header: { paddingHorizontal: 16, paddingTop: 6, paddingBottom: 10 },
   cover: { width: "100%", height: 160, borderRadius: 12, backgroundColor: "#EEE" },
@@ -338,8 +444,14 @@ const styles = StyleSheet.create({
   metaRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
   metaText: { fontSize: 14, color: "#333" },
   statusPillBase: {
-    marginTop: 8, alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 6,
-    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999,
+    marginTop: 8,
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
   },
   statusPillOpen: { backgroundColor: "#E8F7EE" },
   statusPillClosed: { backgroundColor: "#FDEBEC" },
@@ -355,16 +467,27 @@ const styles = StyleSheet.create({
   chipTextInactive: { color: "#111827" },
 
   itemCard: {
-    flexDirection: "row", alignItems: "center",
-    paddingHorizontal: 16, paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E9E9EA", gap: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#E9E9EA",
+    gap: 12,
   },
   itemImage: { width: 72, height: 72, borderRadius: 10, backgroundColor: "#EEE" },
   itemImagePlaceholder: { alignItems: "center", justifyContent: "center" },
   itemInfo: { flex: 1 },
   itemName: { fontSize: 16, fontWeight: "600" },
   itemPrice: { marginTop: 4, fontSize: 14, color: "#333" },
-  catPill: { marginTop: 6, alignSelf: "flex-start", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: "#F4F4F5" },
+  catPill: {
+    marginTop: 6,
+    alignSelf: "flex-start",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: "#F4F4F5",
+  },
   catPillText: { fontSize: 12, color: "#555" },
 
   empty: { alignItems: "center", justifyContent: "center", paddingTop: 24 },

@@ -1,7 +1,7 @@
 import { SafeAreaView } from "react-native-safe-area-context";
 import "../globals.css";
 import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
-import { ActivityIndicator, Animated } from "react-native";
+import { ActivityIndicator, Animated, Alert, View, Text, StyleSheet } from "react-native";
 import { useRouter } from "expo-router";
 import useAuthStore from "@/store/auth.store";
 import { databases, appwriteConfig } from "@/lib/appwrite";
@@ -38,6 +38,7 @@ type Restaurant = {
   categories?: string[];
   deliveryTimeMins?: number;
   description?: string;
+  open?: boolean; // 👈 NEW
 };
 
 function timeOfDayGreeting(d = new Date()) {
@@ -58,6 +59,7 @@ const shapeDocs = (docs: any[]): Restaurant[] =>
       categories: Array.isArray(d.categories) ? d.categories.map((x: any) => String(x)) : undefined,
       deliveryTimeMins: typeof d.deliveryTimeMins === "number" ? d.deliveryTimeMins : undefined,
       description: typeof d.description === "string" ? d.description : undefined,
+      open: typeof d.open === "boolean" ? d.open : true, // default open=true for older docs
     }))
     .filter((r) => r.name.length > 0);
 
@@ -96,84 +98,76 @@ export default function HomeIndex() {
   }, []);
 
   /** Normal browse: first page */
- const loadInitial = useCallback(async () => {
-  setLoading(true);
-  setIsSearching(false);
-  try {
-    const res = await databases.listDocuments(
-      DB_ID,
-      COLLECTION_RESTAURANTS,
-      [Query.orderAsc("name"), Query.limit(PAGE_SIZE)]
-    );
-    const items = shapeDocs(res.documents ?? []);
-    setRestaurants(items);
-    setNextCursor(items.length === PAGE_SIZE ? items[items.length - 1].$id : null);
-  } catch (err: any) {
-    console.error("loadInitial failed (ordered):", err?.message || err);
-    // fallback: try again without orderAsc (works even if index missing)
+  const loadInitial = useCallback(async () => {
+    setLoading(true);
+    setIsSearching(false);
     try {
-      const res2 = await databases.listDocuments(
-        DB_ID,
-        COLLECTION_RESTAURANTS,
-        [Query.limit(PAGE_SIZE)]
-      );
-      const items2 = shapeDocs(res2.documents ?? []);
-      setRestaurants(items2);
-      setNextCursor(items2.length === PAGE_SIZE ? items2[items2.length - 1].$id : null);
-    } catch (err2: any) {
-      console.error("loadInitial fallback failed:", err2?.message || err2);
-      setRestaurants([]);
-      setNextCursor(null);
+      const res = await databases.listDocuments(DB_ID, COLLECTION_RESTAURANTS, [
+        Query.orderAsc("name"),
+        Query.limit(PAGE_SIZE),
+      ]);
+      const items = shapeDocs(res.documents ?? []);
+      setRestaurants(items);
+      setNextCursor(items.length === PAGE_SIZE ? items[items.length - 1].$id : null);
+    } catch (err: any) {
+      console.error("loadInitial failed (ordered):", err?.message || err);
+      // fallback: try again without orderAsc (works even if index missing)
+      try {
+        const res2 = await databases.listDocuments(DB_ID, COLLECTION_RESTAURANTS, [Query.limit(PAGE_SIZE)]);
+        const items2 = shapeDocs(res2.documents ?? []);
+        setRestaurants(items2);
+        setNextCursor(items2.length === PAGE_SIZE ? items2[items2.length - 1].$id : null);
+      } catch (err2: any) {
+        console.error("loadInitial fallback failed:", err2?.message || err2);
+        setRestaurants([]);
+        setNextCursor(null);
+      }
+    } finally {
+      setLoading(false);
+      initialLoadedRef.current = true;
     }
-  } finally {
-    setLoading(false);
-    initialLoadedRef.current = true;
-  }
-}, []);
+  }, []);
 
-const loadMore = useCallback(async () => {
-  if (isSearching) return;
-  if (!nextCursor || loadingMoreRef.current || isLoadingMore) return;
+  const loadMore = useCallback(async () => {
+    if (isSearching) return;
+    if (!nextCursor || loadingMoreRef.current || isLoadingMore) return;
 
-  loadingMoreRef.current = true;
-  setIsLoadingMore(true);
-  try {
-    const res = await databases.listDocuments(
-      DB_ID,
-      COLLECTION_RESTAURANTS,
-      [Query.orderAsc("name"), Query.limit(PAGE_SIZE), Query.cursorAfter(nextCursor)]
-    );
-    const items = shapeDocs(res.documents ?? []);
-    setRestaurants((prev) => [...prev, ...items]);
-    setNextCursor(items.length === PAGE_SIZE ? items[items.length - 1].$id : null);
-  } catch (err: any) {
-    console.error("loadMore failed (ordered):", err?.message || err);
-    // fallback without ordering
+    loadingMoreRef.current = true;
+    setIsLoadingMore(true);
     try {
-      const res2 = await databases.listDocuments(
-        DB_ID,
-        COLLECTION_RESTAURANTS,
-        [Query.limit(PAGE_SIZE), Query.cursorAfter(nextCursor)]
-      );
-      const items2 = shapeDocs(res2.documents ?? []);
-      setRestaurants((prev) => [...prev, ...items2]);
-      setNextCursor(items2.length === PAGE_SIZE ? items2[items2.length - 1].$id : null);
-    } catch (err2: any) {
-      console.error("loadMore fallback failed:", err2?.message || err2);
+      const res = await databases.listDocuments(DB_ID, COLLECTION_RESTAURANTS, [
+        Query.orderAsc("name"),
+        Query.limit(PAGE_SIZE),
+        Query.cursorAfter(nextCursor),
+      ]);
+      const items = shapeDocs(res.documents ?? []);
+      setRestaurants((prev) => [...prev, ...items]);
+      setNextCursor(items.length === PAGE_SIZE ? items[items.length - 1].$id : null);
+    } catch (err: any) {
+      console.error("loadMore failed (ordered):", err?.message || err);
+      // fallback without ordering
+      try {
+        const res2 = await databases.listDocuments(DB_ID, COLLECTION_RESTAURANTS, [
+          Query.limit(PAGE_SIZE),
+          Query.cursorAfter(nextCursor),
+        ]);
+        const items2 = shapeDocs(res2.documents ?? []);
+        setRestaurants((prev) => [...prev, ...items2]);
+        setNextCursor(items2.length === PAGE_SIZE ? items2[items2.length - 1].$id : null);
+      } catch (err2: any) {
+        console.error("loadMore fallback failed:", err2?.message || err2);
+      }
+    } finally {
+      setIsLoadingMore(false);
+      loadingMoreRef.current = false;
     }
-  } finally {
-    setIsLoadingMore(false);
-    loadingMoreRef.current = false;
-  }
-}, [nextCursor, isLoadingMore, isSearching]);
-
+  }, [nextCursor, isLoadingMore, isSearching]);
 
   /** Fetch ALL (batched) then filter locally — reliable search */
   const runSearch = useCallback(
     async (termRaw: string) => {
       const term = termRaw.trim();
       if (!term) {
-        // If user submits empty, just restore full list
         await loadInitial();
         return;
       }
@@ -214,18 +208,17 @@ const loadMore = useCallback(async () => {
     loadInitial();
   }, [loadInitial]);
 
-  // ✅ Auto-restore full list when the search field is cleared (no button press)
+  // Auto-restore full list when the search field is cleared
   useEffect(() => {
     const cleared = search.trim().length === 0;
     if (!cleared) return;
-    if (!initialLoadedRef.current) return; // avoid second fetch on mount
+    if (!initialLoadedRef.current) return;
     setIsSearching(false);
     setNextCursor(null);
     loadInitial();
   }, [search, loadInitial]);
 
   const onSubmitSearch = () => {
-    // only trigger when user presses Search/Return
     runSearch(search);
   };
 
@@ -268,15 +261,36 @@ const loadMore = useCallback(async () => {
           <Animated.FlatList
             data={restaurants}
             keyExtractor={(i) => i.$id}
-            renderItem={({ item }) => (
-              <RestaurantCardLight
-                item={item}
-                onPress={() => (router as any).push({
-                    pathname: "/restaurants/[id]",   // runtime URL (group name isn’t part of the URL)
-                    params: { id: String(item.$id) },
-})}
-              />
-            )}
+            renderItem={({ item }) => {
+              const isClosed = item.open === false;
+              const handlePress = () => {
+                if (isClosed) {
+                  Alert.alert("Closed", "This restaurant is currently closed.");
+                  return;
+                }
+                (router as any).push({
+                  pathname: "/restaurants/[id]",
+                  params: { id: String(item.$id) },
+                });
+              };
+
+              return (
+                <View style={{ opacity: isClosed ? 0.55 : 1 }}>
+                  <RestaurantCardLight
+                    item={item}
+                    // If your card supports a "disabled" prop, pass it too:
+                    // @ts-ignore
+                    disabled={isClosed}
+                    onPress={handlePress}
+                  />
+                  {isClosed && (
+                    <View style={styles.closedRow}>
+                      <Text style={styles.closedPill}>Closed</Text>
+                    </View>
+                  )}
+                </View>
+              );
+            }}
             ListHeaderComponent={header}
             ListFooterComponent={footer}
             onEndReachedThreshold={0.4}
@@ -292,3 +306,23 @@ const loadMore = useCallback(async () => {
     </SafeAreaView>
   );
 }
+
+const styles = StyleSheet.create({
+  closedRow: {
+    marginTop: 6,
+    marginLeft: 12,
+    marginBottom: 4,
+  },
+  closedPill: {
+    alignSelf: "flex-start",
+    backgroundColor: "#FEE2E2",
+    color: "#991B1B",
+    borderWidth: 1,
+    borderColor: "#FECACA",
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    fontSize: 11,
+    fontWeight: "900",
+  },
+});
